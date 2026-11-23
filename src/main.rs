@@ -51,8 +51,52 @@ fn parse_area(area_str: &str) -> Result<(i32, i32, u32, u32), String> {
     Ok((x, y, w, h))
 }
 
+fn find_script(name: &str) -> Option<PathBuf> {
+    let local = PathBuf::from(format!("scripts/{}", name));
+    if local.exists() {
+        return Some(local.canonicalize().unwrap_or(local));
+    }
+
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let candidate = dir.join(format!("scripts/{}", name));
+            if candidate.exists() {
+                return Some(candidate);
+            }
+            let candidate2 = dir.join(format!("../share/gnomescroll/{}", name));
+            if candidate2.exists() {
+                return Some(candidate2);
+            }
+        }
+    }
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home/kalpit"));
+    let user_share = home.join(format!(".local/share/gnomescroll/{}", name));
+    if user_share.exists() {
+        return Some(user_share);
+    }
+
+    None
+}
+
+fn select_area_interactive() -> Option<(i32, i32, u32, u32)> {
+    if let Some(script_path) = find_script("select_area.py") {
+        if let Ok(output) = std::process::Command::new(script_path).output() {
+            if output.status.success() {
+                let stdout_str = String::from_utf8_lossy(&output.stdout);
+                let trimmed = stdout_str.trim();
+                if let Ok(geom) = parse_area(trimmed) {
+                    return Some(geom);
+                }
+            } else {
+                return None; // User pressed Esc or cancelled
+            }
+        }
+    }
+    Some(get_primary_monitor_geometry())
+}
+
 fn get_primary_monitor_geometry() -> (i32, i32, u32, u32) {
-    // Default fallback: 1920x1080 at 0,0
     (0, 0, 1920, 1080)
 }
 
@@ -68,9 +112,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         },
         None => {
-            println!("ℹ️  No --area specified. Defaulting to primary display.");
-            println!("💡 Tip: Trigger via GNOME Screenshot UI (Super+Shift+S) for area selection.");
-            get_primary_monitor_geometry()
+            match select_area_interactive() {
+                Some(geom) => geom,
+                None => {
+                    println!("🚫 Area selection cancelled.");
+                    return Ok(());
+                }
+            }
         }
     };
 

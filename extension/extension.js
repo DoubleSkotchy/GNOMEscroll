@@ -4,21 +4,58 @@ import GLib from 'gi://GLib';
 import GObject from 'gi://GObject';
 import St from 'gi://St';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
+import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import {Extension} from 'resource:///org/gnome/shell/extensions/extension.js';
 
 export default class GNOMEscrollExtension extends Extension {
     enable() {
         this._scrollButton = null;
-        this._injectUI();
+        this._indicator = null;
+        this._tooltip = null;
+
+        this._injectTopBarIndicator();
+        this._injectScreenshotUI();
     }
 
-    _injectUI() {
+    _injectTopBarIndicator() {
+        try {
+            this._indicator = new PanelMenu.Button(0.0, 'GNOMEscroll', false);
+            const icon = new St.Icon({
+                icon_name: 'camera-photo-symbolic',
+                style_class: 'system-status-icon',
+            });
+            this._indicator.add_child(icon);
+
+            const itemCapture = new PopupMenu.PopupMenuItem('📸 Open Screenshot Tool (Super+Shift+S)');
+            itemCapture.connect('activate', () => {
+                if (Main.screenshotUI) {
+                    Main.screenshotUI.open();
+                }
+            });
+            this._indicator.menu.addMenuItem(itemCapture);
+
+            const itemFolder = new PopupMenu.PopupMenuItem('📂 Open Screenshots Folder');
+            itemFolder.connect('activate', () => {
+                const home = GLib.get_home_dir();
+                const path = `${home}/Pictures/Screenshots`;
+                Gio.AppInfo.launch_default_for_uri(`file://${path}`, null);
+            });
+            this._indicator.menu.addMenuItem(itemFolder);
+
+            Main.panel.addToStatusArea('gnomescroll-indicator', this._indicator);
+        } catch (e) {
+            logError(e, 'Failed to inject GNOMEscroll top bar indicator');
+        }
+    }
+
+    _injectScreenshotUI() {
         const screenshotUI = Main.screenshotUI;
         if (!screenshotUI || !screenshotUI._shotCastContainer) {
             return;
         }
 
-        // Create our Scrolling Screenshot button
+        // Create Scrolling Screenshot button inside screenshot overlay
         this._scrollButton = new St.Button({
             style_class: 'screenshot-ui-shot-cast-button gnomescroll-button',
             icon_name: 'view-paged-symbolic',
@@ -26,7 +63,6 @@ export default class GNOMEscrollExtension extends Extension {
             reactive: true,
         });
 
-        // Tooltip
         this._tooltip = new St.Label({
             text: 'Scrolling Screenshot (GNOMEscroll)',
             style_class: 'screenshot-ui-tooltip',
@@ -52,7 +88,6 @@ export default class GNOMEscrollExtension extends Extension {
             this._startScrollingScreenshot();
         });
 
-        // Insert right into the shot/cast toggle container
         screenshotUI._shotCastContainer.add_child(this._scrollButton);
     }
 
@@ -60,7 +95,6 @@ export default class GNOMEscrollExtension extends Extension {
         const screenshotUI = Main.screenshotUI;
         if (!screenshotUI) return;
 
-        // Obtain selected geometry [x, y, w, h] (true for rescaled coordinates)
         const geometry = screenshotUI._getSelectedGeometry(true);
         if (!geometry || geometry[2] <= 0 || geometry[3] <= 0) {
             Main.notify('GNOMEscroll', 'Please select a valid area first.');
@@ -68,11 +102,8 @@ export default class GNOMEscrollExtension extends Extension {
         }
 
         const [x, y, w, h] = geometry.map(v => Math.round(v));
-
-        // Close the screenshot overlay immediately so it doesn't appear in the capture
         screenshotUI.close(true);
 
-        // Find gnomescroll binary
         let binaryPath = GLib.find_program_in_path('gnomescroll');
         if (!binaryPath) {
             const home = GLib.get_home_dir();
@@ -97,6 +128,10 @@ export default class GNOMEscrollExtension extends Extension {
     }
 
     disable() {
+        if (this._indicator) {
+            this._indicator.destroy();
+            this._indicator = null;
+        }
         if (this._tooltip) {
             this._tooltip.destroy();
             this._tooltip = null;

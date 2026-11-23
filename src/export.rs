@@ -108,3 +108,4 @@ fn send_notification(file_path: &Path, copied: bool) {
         ])
         .spawn();
 }
+

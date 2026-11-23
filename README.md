@@ -1,6 +1,6 @@
 # GNOMEscroll 📜⚡
 
-> **High-Performance Scrolling Screenshot Utility for GNOME (Wayland & X11)**  
+> **High-Performance Scrolling Screenshot Utility for GNOME (Wayland)**  
 > Written in optimized **Rust** with multi-threaded SIMD stitching, native Wayland PipeWire capture, and seamless integration into GNOME's native Screenshot UI (`Super+Shift+S`).
 
 ---
@@ -115,3 +115,4 @@ To remove GNOMEscroll cleanly:
 ## 📜 License
 
 MIT License. Free for personal and commercial use.
+

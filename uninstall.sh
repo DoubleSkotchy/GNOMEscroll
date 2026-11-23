@@ -9,3 +9,4 @@ if which gnome-extensions >/dev/null 2>&1; then
 fi
 rm -rf "$HOME/.local/share/gnome-shell/extensions/gnomescroll@kalpit.github.com"
 echo "GNOMEscroll uninstalled."
+
