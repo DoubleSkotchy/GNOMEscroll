@@ -6,6 +6,14 @@ authors = ["Kalpit"]
 description = "High-performance scrolling screenshot utility for GNOME Wayland"
 license = "MIT"
 
+[lib]
+name = "gnomescroll"
+path = "src/lib.rs"
+
+[[bin]]
+name = "gnomescroll"
+path = "src/main.rs"
+
 [dependencies]
 zbus = { version = "5.5", features = ["blocking-api", "async-io"] }
 image = { version = "0.25", default-features = false, features = ["png"] }

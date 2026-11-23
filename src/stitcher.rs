@@ -4,8 +4,8 @@ pub struct FrameStitcher {
     width: usize,
     height: usize,
     canvas: Vec<u8>,
-    current_height: usize,
-    prev_frame: Option<Vec<u8>>,
+    pub current_height: usize,
+    anchor_frame: Option<Vec<u8>>,
     max_delta: usize,
     pub stitched_count: usize,
 }
@@ -14,15 +14,15 @@ impl FrameStitcher {
     pub fn new(width: u32, height: u32) -> Self {
         let w = width as usize;
         let h = height as usize;
-        // Search up to 35% of the frame height per step (e.g. up to 280px on 800h)
-        let max_delta = (h as f64 * 0.35) as usize;
+        // Search up to 85% of the frame height per step to accommodate large mouse wheel jumps
+        let max_delta = (h as f64 * 0.85) as usize;
 
         Self {
             width: w,
             height: h,
             canvas: Vec::new(),
             current_height: 0,
-            prev_frame: None,
+            anchor_frame: None,
             max_delta: max_delta.max(60),
             stitched_count: 0,
         }
@@ -35,170 +35,280 @@ impl FrameStitcher {
             return false;
         }
 
-        // First frame: initialize canvas
-        if self.prev_frame.is_none() {
+        // First frame: initialize canvas and anchor
+        if self.anchor_frame.is_none() {
             self.canvas.extend_from_slice(frame);
             self.current_height = self.height;
-            self.prev_frame = Some(frame.to_vec());
+            self.anchor_frame = Some(frame.to_vec());
             self.stitched_count = 1;
             return true;
         }
 
-        let prev = self.prev_frame.as_ref().unwrap();
+        let anchor = self.anchor_frame.as_ref().unwrap();
 
-        // 1. Fast check if frame is stationary (no scroll, cursor blink, idle)
-        if self.is_stationary(prev, frame) {
+        // 1. Fast stationary check: if screen didn't scroll, skip
+        if self.is_stationary(anchor, frame) {
             return false;
         }
 
-        // 2. Dynamic Feature-Rich Template Selection
-        // Instead of hardcoding a region (which might be blank white margin in PDFs),
-        // we dynamically find the vertical window in `prev` that has maximum text/contrast!
-        let template_h = (self.height as f64 * 0.35) as usize;
-        let max_d = self.max_delta.min(self.height / 3);
-
-        let (y0, contrast) = self.find_high_contrast_window(prev, template_h, max_d);
-
-        // If the window has virtually zero contrast (pure white/blank page), skip until content appears
-        if contrast < 12.0 {
-            self.prev_frame = Some(frame.to_vec());
+        // 2. Full-Overlap Parallel Alignment Search
+        // We evaluate candidate downward shifts delta \in [1, max_delta].
+        // For a shift of delta:
+        // anchor rows [delta .. height] must match curr rows [0 .. height - delta]
+        let max_d = self.max_delta.min(self.height.saturating_sub(30));
+        if max_d < 1 {
             return false;
         }
 
-        // Search in parallel across candidate scroll shifts delta \in [1, max_d]
-        let best_match: Option<(usize, f64)> = (1..=max_d)
+        let candidates: Vec<(usize, f64, f64, usize)> = (1..=max_d)
             .into_par_iter()
             .map(|delta| {
-                let f2_y0 = y0 - delta;
-                let sad_per_pixel = self.compute_template_sad(prev, y0, frame, f2_y0, template_h);
-                (delta, sad_per_pixel)
+                let (sad, ink_sad, ink_count) = self.compute_overlap_metrics(anchor, frame, delta);
+                (delta, sad, ink_sad, ink_count)
             })
-            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            .collect();
 
-        if let Some((best_delta, min_sad)) = best_match {
-            // Threshold: average RGB channel error < 22 out of 255
-            if min_sad < 22.0 {
-                // Verified match! Append newly revealed bottom rows of `frame`
-                let start_row = self.height - best_delta;
-                let start_byte = start_row * self.width * 4;
-                let end_byte = self.height * self.width * 4;
+        if candidates.is_empty() {
+            return false;
+        }
 
-                self.canvas.extend_from_slice(&frame[start_byte..end_byte]);
-                self.current_height += best_delta;
-                self.prev_frame = Some(frame.to_vec());
-                self.stitched_count += 1;
-                return true;
+        // Find the best candidates from coarse pass
+        let mut sorted = candidates.clone();
+        sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        let coarse_best_delta = sorted[0].0;
+
+        // Stage 2: Fine full-resolution refinement around coarse best (delta +/- 3)
+        // With row_step = 1, every row is evaluated, eliminating any odd/even sampling parity bias.
+        let fine_start = coarse_best_delta.saturating_sub(3).max(1);
+        let fine_end = (coarse_best_delta + 3).min(max_d);
+
+        let mut best_delta = coarse_best_delta;
+        let mut min_sad = f64::MAX;
+        let mut ink_sad = f64::MAX;
+        let mut ink_count = 0usize;
+
+        for d in fine_start..=fine_end {
+            let (s, is, ic) = self.compute_fine_overlap_metrics(anchor, frame, d);
+            if s < min_sad {
+                min_sad = s;
+                ink_sad = is;
+                ink_count = ic;
+                best_delta = d;
             }
         }
 
-        // If sudden jump or match not found, update prev_frame so subsequent frames don't drift
-        self.prev_frame = Some(frame.to_vec());
-        false
-    }
-
-    /// Find the vertical slice [y0 - template_h .. y0] in `prev` that has maximum visual contrast/variance
-    fn find_high_contrast_window(&self, prev: &[u8], template_h: usize, max_d: usize) -> (usize, f64) {
-        let w = self.width;
-        let h = self.height;
-        let search_start = template_h + max_d;
-        let search_end = h.saturating_sub(10);
-
-        if search_start >= search_end {
-            return (h.min(template_h + max_d), 0.0);
+        // 3. Mathematical Verification & Anti-Superimposition Gates
+        // Gate A: Global overlap SAD must be clean (typical match < 3.0, allow up to 4.8 for slight anti-aliasing)
+        if min_sad > 4.8 {
+            return false;
         }
 
-        let mut best_y = search_start;
-        let mut max_var = -1.0;
+        // Gate B: Text/Ink SAD check (strictly prevents line-to-line collisions like 8.2 on 8.3)
+        // When text lines overlap incorrectly, ink_sad is > 40.0. True alignment has ink_sad < 8.0.
+        if ink_count >= 30 && ink_sad > 14.0 {
+            return false;
+        }
 
-        for y in (search_start..search_end).step_by(12) {
-            let mut sum = 0u64;
-            let mut sum_sq = 0u64;
-            let mut count = 0u64;
+        // Gate C: Minimum feature presence
+        // If the entire overlapping region is pure blank paper (virtually zero ink),
+        // we do not guess an arbitrary shift; wait until content enters the frame.
+        if ink_count < 20 && min_sad > 0.8 {
+            return false;
+        }
 
-            for r in (y - template_h..y).step_by(6) {
-                let row_off = r * w * 4;
-                for c in (0..w).step_by(12) {
-                    let val = prev[row_off + c * 4] as u64;
-                    sum += val;
-                    sum_sq += val * val;
-                    count += 1;
+        // Gate D: Uniqueness / Ambiguity ratio
+        // If there's another local minimum outside delta +/- 6 with nearly identical SAD,
+        // it indicates repetitive periodic patterns (like zebra stripes or dense identical grids).
+        if sorted.len() > 1 {
+            for other in &sorted[1..] {
+                let diff_d = (other.0 as isize - best_delta as isize).abs();
+                if diff_d > 6 {
+                    // If competitor is too close in SAD and min_sad isn't near zero, reject ambiguous match
+                    if other.1 < min_sad * 1.30 && min_sad > 2.0 {
+                        return false;
+                    }
+                    break;
                 }
             }
-
-            if count > 0 {
-                let mean = sum as f64 / count as f64;
-                let var = (sum_sq as f64 / count as f64) - (mean * mean);
-                if var > max_var {
-                    max_var = var;
-                    best_y = y;
-                }
-            }
         }
 
-        (best_y, max_var)
+        // Verified High-Confidence Match!
+        // Append rows [height - best_delta .. height] from current frame
+        let start_row = self.height - best_delta;
+        let start_byte = start_row * self.width * 4;
+        let end_byte = self.height * self.width * 4;
+
+        self.canvas.extend_from_slice(&frame[start_byte..end_byte]);
+        self.current_height += best_delta;
+        // Update anchor frame to the newly stitched frame
+        self.anchor_frame = Some(frame.to_vec());
+        self.stitched_count += 1;
+        true
     }
 
     /// Fast check if consecutive frames are essentially identical (cursor blink, idle)
-    fn is_stationary(&self, prev: &[u8], curr: &[u8]) -> bool {
+    fn is_stationary(&self, anchor: &[u8], curr: &[u8]) -> bool {
         let w = self.width;
         let h = self.height;
-        let row_step = 12;
-        let col_step = 16;
+        let row_step = 4;
+        let col_step = 8;
         let mut diff_sum = 0u64;
+        let mut max_diff = 0i32;
         let mut count = 0u64;
 
-        for r in (h / 4..3 * h / 4).step_by(row_step) {
+        for r in (0..h).step_by(row_step) {
             let row_off = r * w * 4;
-            for c in (w / 4..3 * w / 4).step_by(col_step) {
+            for c in (0..w).step_by(col_step) {
                 let idx = row_off + c * 4;
-                let dr = (prev[idx] as i32 - curr[idx] as i32).abs() as u64;
-                let dg = (prev[idx + 1] as i32 - curr[idx + 1] as i32).abs() as u64;
-                let db = (prev[idx + 2] as i32 - curr[idx + 2] as i32).abs() as u64;
-                diff_sum += dr + dg + db;
+                let dr = (anchor[idx] as i32 - curr[idx] as i32).abs();
+                let dg = (anchor[idx + 1] as i32 - curr[idx + 1] as i32).abs();
+                let db = (anchor[idx + 2] as i32 - curr[idx + 2] as i32).abs();
+                let m = dr.max(dg).max(db);
+                if m > max_diff {
+                    max_diff = m;
+                }
+                diff_sum += (dr + dg + db) as u64;
                 count += 3;
             }
         }
 
         let avg = if count > 0 { diff_sum as f64 / count as f64 } else { 0.0 };
-        avg < 1.8
+        // Stationary only if whole-frame average is negligible AND no significant pixel changed
+        avg < 0.4 && max_diff < 20
     }
 
-    /// Compute Mean Absolute Difference per color channel between template in prev and candidate in curr
-    fn compute_template_sad(
+    /// Compute full-overlap SAD and ink-weighted SAD for a given downward delta shift (coarse pass)
+    fn compute_overlap_metrics(
         &self,
-        prev: &[u8],
-        prev_y0: usize,
+        anchor: &[u8],
         curr: &[u8],
-        curr_y0: usize,
-        template_h: usize,
-    ) -> f64 {
+        delta: usize,
+    ) -> (f64, f64, usize) {
         let w = self.width;
+        let overlap_h = self.height - delta;
         let row_step = 2;
         let col_step = 4;
-        let mut total_diff = 0u64;
-        let mut samples = 0u64;
 
-        for r in (0..template_h).step_by(row_step) {
-            let p_row_off = (prev_y0 - template_h + r) * w * 4;
-            let c_row_off = (curr_y0 - template_h + r) * w * 4;
+        let mut total_diff = 0u64;
+        let mut total_samples = 0u64;
+
+        let mut ink_diff = 0u64;
+        let mut ink_samples = 0usize;
+
+        for r in (0..overlap_h).step_by(row_step) {
+            let a_off = (delta + r) * w * 4;
+            let c_off = r * w * 4;
 
             for c in (0..w).step_by(col_step) {
-                let pi = p_row_off + c * 4;
-                let ci = c_row_off + c * 4;
+                let ai = a_off + c * 4;
+                let ci = c_off + c * 4;
 
-                let dr = (prev[pi] as i32 - curr[ci] as i32).abs() as u64;
-                let dg = (prev[pi + 1] as i32 - curr[pi + 1] as i32).abs() as u64;
-                let db = (prev[pi + 2] as i32 - curr[ci + 2] as i32).abs() as u64;
-                total_diff += dr + dg + db;
-                samples += 3;
+                let ar = anchor[ai] as i32;
+                let ag = anchor[ai + 1] as i32;
+                let ab = anchor[ai + 2] as i32;
+
+                let cr = curr[ci] as i32;
+                let cg = curr[ci + 1] as i32;
+                let cb = curr[ci + 2] as i32;
+
+                let dr = (ar - cr).abs() as u64;
+                let dg = (ag - cg).abs() as u64;
+                let db = (ab - cb).abs() as u64;
+
+                let d_sum = dr + dg + db;
+                total_diff += d_sum;
+                total_samples += 3;
+
+                // Ink/Text detector: pixels that are not pure background (brightness < 235)
+                let a_lum = (ar + ag + ab) / 3;
+                let c_lum = (cr + cg + cb) / 3;
+                if a_lum < 235 || c_lum < 235 {
+                    ink_diff += d_sum;
+                    ink_samples += 3;
+                }
             }
         }
 
-        if samples > 0 {
-            total_diff as f64 / samples as f64
+        let total_sad = if total_samples > 0 {
+            total_diff as f64 / total_samples as f64
         } else {
             255.0
+        };
+
+        let ink_sad = if ink_samples > 0 {
+            ink_diff as f64 / ink_samples as f64
+        } else {
+            0.0
+        };
+
+        (total_sad, ink_sad, ink_samples)
+    }
+
+    /// Stage 2: Fine full-resolution evaluation (row_step = 1) for sub-pixel/exact integer precision
+    fn compute_fine_overlap_metrics(
+        &self,
+        anchor: &[u8],
+        curr: &[u8],
+        delta: usize,
+    ) -> (f64, f64, usize) {
+        let w = self.width;
+        let overlap_h = self.height - delta;
+        let row_step = 1; // Evaluates EVERY row!
+        let col_step = 2;
+
+        let mut total_diff = 0u64;
+        let mut total_samples = 0u64;
+
+        let mut ink_diff = 0u64;
+        let mut ink_samples = 0usize;
+
+        for r in (0..overlap_h).step_by(row_step) {
+            let a_off = (delta + r) * w * 4;
+            let c_off = r * w * 4;
+
+            for c in (0..w).step_by(col_step) {
+                let ai = a_off + c * 4;
+                let ci = c_off + c * 4;
+
+                let ar = anchor[ai] as i32;
+                let ag = anchor[ai + 1] as i32;
+                let ab = anchor[ai + 2] as i32;
+
+                let cr = curr[ci] as i32;
+                let cg = curr[ci + 1] as i32;
+                let cb = curr[ci + 2] as i32;
+
+                let dr = (ar - cr).abs() as u64;
+                let dg = (ag - cg).abs() as u64;
+                let db = (ab - cb).abs() as u64;
+
+                let d_sum = dr + dg + db;
+                total_diff += d_sum;
+                total_samples += 3;
+
+                let a_lum = (ar + ag + ab) / 3;
+                let c_lum = (cr + cg + cb) / 3;
+                if a_lum < 235 || c_lum < 235 {
+                    ink_diff += d_sum;
+                    ink_samples += 3;
+                }
+            }
         }
+
+        let total_sad = if total_samples > 0 {
+            total_diff as f64 / total_samples as f64
+        } else {
+            255.0
+        };
+
+        let ink_sad = if ink_samples > 0 {
+            ink_diff as f64 / ink_samples as f64
+        } else {
+            0.0
+        };
+
+        (total_sad, ink_sad, ink_samples)
     }
 
     /// Return the finalized RGBA image dimensions, total stitched frame count, and pixel buffer
