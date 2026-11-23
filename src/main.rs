@@ -85,7 +85,8 @@ fn select_area_interactive() -> Option<(i32, i32, u32, u32)> {
             if output.status.success() {
                 let stdout_str = String::from_utf8_lossy(&output.stdout);
                 let trimmed = stdout_str.trim();
-                if let Ok(geom) = parse_area(trimmed) {
+                let last_line = trimmed.lines().last().unwrap_or(trimmed);
+                if let Ok(geom) = parse_area(last_line) {
                     return Some(geom);
                 }
             } else {

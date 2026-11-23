@@ -4,6 +4,9 @@ import os
 import sys
 import math
 import subprocess
+import warnings
+warnings.filterwarnings('ignore')
+
 import cairo
 import gi
 
