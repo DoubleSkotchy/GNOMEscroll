@@ -168,13 +168,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stitcher = stitcher::FrameStitcher::new(width, height);
     let mut frames_received = 0usize;
 
-    // Wait for initial frame from screencast pipeline
-    for _ in 0..25 {
-        if let Ok(frame) = frame_rx.recv_timeout(Duration::from_millis(100)) {
+    // Discard any preroll frames so frame 1 is guaranteed 100% clean
+    std::thread::sleep(Duration::from_millis(150));
+    let mut initial_frame = None;
+    while let Ok(frame) = frame_rx.try_recv() {
+        frames_received += 1;
+        initial_frame = Some(frame);
+    }
+    if initial_frame.is_none() {
+        if let Ok(frame) = frame_rx.recv_timeout(Duration::from_millis(600)) {
             frames_received += 1;
-            stitcher.feed_frame(&frame);
-            break;
+            initial_frame = Some(frame);
         }
+    }
+    if let Some(frame) = initial_frame {
+        stitcher.feed_frame(&frame);
     }
 
     // Loop until user signals Finish or Cancel

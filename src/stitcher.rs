@@ -44,9 +44,9 @@ impl FrameStitcher {
         }
 
         // Margins to exclude scrollbar (right) and window borders (left)
-        let left_m = 12.min(self.width / 16);
-        let right_m = self.width.saturating_sub(36.min(self.width / 12));
-        if right_m <= left_m + 30 {
+        let left_m = 16.min(self.width / 12);
+        let right_m = self.width.saturating_sub(40.min(self.width / 10));
+        if right_m <= left_m + 50 {
             return false;
         }
 
@@ -67,7 +67,7 @@ impl FrameStitcher {
         let (a_prof_l, a_prof_c, a_prof_r) = self.anchor_profiles.as_ref().unwrap();
         let (c_prof_l, c_prof_c, c_prof_r) = &curr_profiles;
 
-        let max_d = self.max_delta.min(self.height.saturating_sub(20));
+        let max_d = self.max_delta.min(self.height.saturating_sub(25));
         if max_d < 2 {
             return false;
         }
@@ -75,9 +75,10 @@ impl FrameStitcher {
         // ══════════════════════════════════════════════════════════════
         // STAGE 1: Bidirectional 1D Profile Scan for delta \in [0, max_d]
         // ══════════════════════════════════════════════════════════════
+        // Evaluate both Scroll Down and Scroll Up candidates in 1D (~0.04ms)
         let mut candidates: Vec<(usize, ScrollDirection, f32)> = Vec::with_capacity(max_d * 2 + 1);
 
-        // Delta = 0 (stationary check)
+        // Delta = 0 (stationary)
         let mut sum_diff_0 = 0.0f32;
         for r in 0..self.height {
             sum_diff_0 += (a_prof_l[r] - c_prof_l[r]).abs()
@@ -167,17 +168,17 @@ impl FrameStitcher {
         // STAGE 3: Robust Validation Gates
         // ══════════════════════════════════════════════════════════════
         // Gate A: Global overlap difference threshold
-        if best_sad > 9.0 {
+        if best_sad > 6.0 {
             return false;
         }
 
         // Gate B: Text/Ink anti-superimposition gate
-        if best_ink_count >= 25 && best_ink_sad > 28.0 {
+        if best_ink_count >= 25 && best_ink_sad > 20.0 {
             return false;
         }
 
-        // Gate C: Minimum feature verification for sparse regions
-        if best_ink_count < 10 && best_sad > 2.0 {
+        // Gate C: Minimum feature verification
+        if best_ink_count < 10 && best_sad > 1.2 {
             return false;
         }
 
