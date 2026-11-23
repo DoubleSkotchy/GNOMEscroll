@@ -1,7 +1,6 @@
 use std::fs::{remove_file, File};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
@@ -9,6 +8,8 @@ use std::sync::Arc;
 use std::thread;
 
 pub const CONTROL_FIFO: &str = "/tmp/gnomescroll_control.fifo";
+pub const PID_FILE: &str = "/tmp/gnomescroll.pid";
+pub const STAMP_FILE: &str = "/tmp/gnomescroll_finish.stamp";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserAction {
@@ -25,22 +26,39 @@ pub struct Controller {
 impl Controller {
     /// Check if another instance is already running; if so, signal it to finish and exit
     pub fn handle_toggle_instance() -> bool {
-        if Path::new(CONTROL_FIFO).exists() {
-            // Attempt non-blocking write to signal active instance
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(CONTROL_FIFO)
-            {
-                let _ = writeln!(file, "DONE");
-                let _ = file.flush();
-                println!("🏁 Signaled running GNOMEscroll instance to finish.");
-                return true;
-            } else {
-                // Stale FIFO without active reader; clean it up
-                let _ = remove_file(CONTROL_FIFO);
+        // 1. Debounce check: if another instance finished or toggled within the last 1.2s, ignore key repeats
+        if let Ok(metadata) = std::fs::metadata(STAMP_FILE) {
+            if let Ok(mtime) = metadata.modified() {
+                if let Ok(elapsed) = mtime.elapsed() {
+                    if elapsed < std::time::Duration::from_millis(1200) {
+                        return true;
+                    }
+                }
             }
         }
+
+        // 2. Check for active running instance via PID file
+        if let Ok(content) = std::fs::read_to_string(PID_FILE) {
+            if let Ok(pid) = content.trim().parse::<i32>() {
+                if unsafe { libc::kill(pid, 0) } == 0 {
+                    // Running instance found; signal it via FIFO
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(CONTROL_FIFO)
+                    {
+                        let _ = writeln!(file, "DONE");
+                        let _ = file.flush();
+                    }
+                    let _ = std::fs::write(STAMP_FILE, format!("{}", std::process::id()));
+                    println!("🏁 Signaled running GNOMEscroll instance to finish.");
+                    return true;
+                }
+            }
+            let _ = remove_file(PID_FILE);
+            let _ = remove_file(CONTROL_FIFO);
+        }
+
         false
     }
 
@@ -48,9 +66,10 @@ impl Controller {
         let (tx, rx) = channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
 
-        // 1. Clean up old FIFO and create new one
+        // 1. Clean up old FIFO & PID file and create fresh ones
         let _ = remove_file(CONTROL_FIFO);
         let _ = Command::new("mkfifo").arg(CONTROL_FIFO).status();
+        let _ = std::fs::write(PID_FILE, format!("{}", std::process::id()));
 
         // 2. FIFO listener thread (receives DONE / CANCEL from toggle shortcut or pill)
         let tx_fifo = tx.clone();
@@ -137,6 +156,8 @@ impl Drop for Controller {
             let _ = child.kill();
             let _ = child.wait();
         }
+        let _ = std::fs::write(STAMP_FILE, format!("{}", std::process::id()));
+        let _ = remove_file(PID_FILE);
         let _ = remove_file(CONTROL_FIFO);
     }
 }
