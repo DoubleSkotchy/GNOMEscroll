@@ -35,9 +35,52 @@ cp -rf "$SCRIPT_DIR/extension/"* "$EXT_DIR/"
 if which gnome-extensions >/dev/null 2>&1; then
     echo "⚙️  Enabling extension in GNOME..."
     gnome-extensions enable "gnomescroll@doubleskotchy.github.com" 2>/dev/null || true
+    if which gsettings >/dev/null 2>&1; then
+        schema="org.gnome.shell"
+        key="enabled-extensions"
+        current=$(gsettings get "$schema" "$key" 2>/dev/null || echo "[]")
+        uuid="gnomescroll@doubleskotchy.github.com"
+        if ! echo "$current" | grep -q "$uuid"; then
+            new_list=$(echo "$current" | sed "s/]/, '$uuid']/")
+            if [ "$current" = "[]" ] || [ "$current" = "@as []" ]; then
+                new_list="['$uuid']"
+            fi
+            gsettings set "$schema" "$key" "$new_list" 2>/dev/null || true
+        fi
+    fi
 fi
 
-# 6. Ensure PATH in ~/.bashrc
+# 6. Configure Super+Ctrl+S shortcut in GNOME Settings if not present
+if which gsettings >/dev/null 2>&1; then
+    schema="org.gnome.settings-daemon.plugins.media-keys"
+    kb_list=$(gsettings get "$schema" custom-keybindings 2>/dev/null || echo "[]")
+    has_gnomescroll=false
+    for path in $(echo "$kb_list" | tr -d "[]'," | tr " " "\n"); do
+        if [ -n "$path" ]; then
+            cmd=$(gsettings get "$schema.custom-keybinding:$path" command 2>/dev/null || true)
+            if echo "$cmd" | grep -q "gnomescroll"; then
+                has_gnomescroll=true
+                break
+            fi
+        fi
+    done
+    if [ "$has_gnomescroll" = false ]; then
+        echo "⚙️  Registering Super+Ctrl+S shortcut in GNOME..."
+        new_path="/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/gnomescroll/"
+        if ! echo "$kb_list" | grep -q "$new_path"; then
+            updated_kb=$(echo "$kb_list" | sed "s/]/, '$new_path']/")
+            if [ "$kb_list" = "[]" ] || [ "$kb_list" = "@as []" ]; then
+                updated_kb="['$new_path']"
+            fi
+            gsettings set "$schema" custom-keybindings "$updated_kb" 2>/dev/null || true
+        fi
+        gsettings set "$schema.custom-keybinding:$new_path" name "GNOMEscroll" 2>/dev/null || true
+        gsettings set "$schema.custom-keybinding:$new_path" command "$HOME/.local/bin/gnomescroll" 2>/dev/null || true
+        gsettings set "$schema.custom-keybinding:$new_path" binding "<Primary><Super>s" 2>/dev/null || true
+    fi
+fi
+
+# 7. Ensure PATH in ~/.bashrc
 if ! grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null; then
     echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
 fi
