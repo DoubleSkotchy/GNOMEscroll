@@ -14,7 +14,7 @@ impl FrameStitcher {
     pub fn new(width: u32, height: u32) -> Self {
         let w = width as usize;
         let h = height as usize;
-        // Search up to 85% of the frame height per step to accommodate large mouse wheel jumps
+        // Search up to 85% of viewport height per step to accommodate large mouse wheel jumps
         let max_delta = (h as f64 * 0.85) as usize;
 
         Self {
@@ -35,7 +35,7 @@ impl FrameStitcher {
             return false;
         }
 
-        // First frame: initialize canvas and anchor
+        // 1. First frame: initialize canvas and anchor
         if self.anchor_frame.is_none() {
             self.canvas.extend_from_slice(frame);
             self.current_height = self.height;
@@ -46,16 +46,21 @@ impl FrameStitcher {
 
         let anchor = self.anchor_frame.as_ref().unwrap();
 
-        // 1. Fast stationary check: if screen didn't scroll, skip
-        if self.is_stationary(anchor, frame) {
+        // Exclude rightmost 32px (moving scrollbar thumb) and leftmost 16px (window borders)
+        let left_m = 16.min(self.width / 12);
+        let right_m = self.width.saturating_sub(32.min(self.width / 12));
+        if right_m <= left_m + 50 {
             return false;
         }
 
-        // 2. Full-Overlap Parallel Alignment Search
-        // We evaluate candidate downward shifts delta \in [1, max_delta].
-        // For a shift of delta:
-        // anchor rows [delta .. height] must match curr rows [0 .. height - delta]
-        let max_d = self.max_delta.min(self.height.saturating_sub(30));
+        // 2. Fast stationary check: if screen didn't scroll, skip without burning CPU
+        if self.is_stationary(anchor, frame, left_m, right_m) {
+            return false;
+        }
+
+        // 3. Stage 1: Parallel Coarse Overlap Scan
+        // Downward displacement delta: anchor[delta .. H] matches curr[0 .. H - delta]
+        let max_d = self.max_delta.min(self.height.saturating_sub(25));
         if max_d < 1 {
             return false;
         }
@@ -63,7 +68,9 @@ impl FrameStitcher {
         let candidates: Vec<(usize, f64, f64, usize)> = (1..=max_d)
             .into_par_iter()
             .map(|delta| {
-                let (sad, ink_sad, ink_count) = self.compute_overlap_metrics(anchor, frame, delta);
+                let (sad, ink_sad, ink_count) = self.compute_overlap_metrics(
+                    anchor, frame, delta, left_m, right_m,
+                );
                 (delta, sad, ink_sad, ink_count)
             })
             .collect();
@@ -72,59 +79,55 @@ impl FrameStitcher {
             return false;
         }
 
-        // Find the best candidates from coarse pass
-        let mut sorted = candidates.clone();
+        let mut sorted = candidates;
         sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let coarse_best_delta = sorted[0].0;
 
-        // Stage 2: Fine full-resolution refinement around coarse best (delta +/- 3)
-        // With row_step = 1, every row is evaluated, eliminating any odd/even sampling parity bias.
-        let fine_start = coarse_best_delta.saturating_sub(3).max(1);
-        let fine_end = (coarse_best_delta + 3).min(max_d);
+        // 4. Stage 2: Fine Full-Resolution Refinement (row_step = 1, col_step = 2)
+        // Evaluates every single row around coarse best (delta +/- 2) to eliminate parity bias
+        let fine_start = coarse_best_delta.saturating_sub(2).max(1);
+        let fine_end = (coarse_best_delta + 2).min(max_d);
 
         let mut best_delta = coarse_best_delta;
         let mut min_sad = f64::MAX;
-        let mut ink_sad = f64::MAX;
-        let mut ink_count = 0usize;
+        let mut best_ink_sad = f64::MAX;
+        let mut best_ink_count = 0usize;
 
         for d in fine_start..=fine_end {
-            let (s, is, ic) = self.compute_fine_overlap_metrics(anchor, frame, d);
+            let (s, is, ic) = self.compute_fine_overlap_metrics(
+                anchor, frame, d, left_m, right_m,
+            );
             if s < min_sad {
                 min_sad = s;
-                ink_sad = is;
-                ink_count = ic;
+                best_ink_sad = is;
+                best_ink_count = ic;
                 best_delta = d;
             }
         }
 
-        // 3. Mathematical Verification & Anti-Superimposition Gates
-        // Gate A: Global overlap SAD must be clean (typical match < 3.0, allow up to 4.8 for slight anti-aliasing)
+        // 5. Mathematical Anti-Superimposition & Validation Gates
+        // Gate A: Global overlap error threshold
         if min_sad > 4.8 {
             return false;
         }
 
-        // Gate B: Text/Ink SAD check (strictly prevents line-to-line collisions like 8.2 on 8.3)
-        // When text lines overlap incorrectly, ink_sad is > 40.0. True alignment has ink_sad < 8.0.
-        if ink_count >= 30 && ink_sad > 14.0 {
+        // Gate B: Text/Ink error threshold (completely prevents colliding lines like 8.2 on 8.3)
+        // On misaligned text, ink_sad is > 40.0. True alignment has ink_sad < 8.0.
+        if best_ink_count >= 20 && best_ink_sad > 14.0 {
             return false;
         }
 
-        // Gate C: Minimum feature presence
-        // If the entire overlapping region is pure blank paper (virtually zero ink),
-        // we do not guess an arbitrary shift; wait until content enters the frame.
-        if ink_count < 20 && min_sad > 0.8 {
+        // Gate C: Minimum feature presence (don't guess in pure white space)
+        if best_ink_count < 15 && min_sad > 0.8 {
             return false;
         }
 
-        // Gate D: Uniqueness / Ambiguity ratio
-        // If there's another local minimum outside delta +/- 6 with nearly identical SAD,
-        // it indicates repetitive periodic patterns (like zebra stripes or dense identical grids).
+        // Gate D: Uniqueness check against repetitive periodic patterns
         if sorted.len() > 1 {
             for other in &sorted[1..] {
                 let diff_d = (other.0 as isize - best_delta as isize).abs();
                 if diff_d > 6 {
-                    // If competitor is too close in SAD and min_sad isn't near zero, reject ambiguous match
                     if other.1 < min_sad * 1.30 && min_sad > 2.0 {
                         return false;
                     }
@@ -134,21 +137,20 @@ impl FrameStitcher {
         }
 
         // Verified High-Confidence Match!
-        // Append rows [height - best_delta .. height] from current frame
+        // Append newly revealed bottom rows [height - best_delta .. height] from frame
         let start_row = self.height - best_delta;
         let start_byte = start_row * self.width * 4;
         let end_byte = self.height * self.width * 4;
 
         self.canvas.extend_from_slice(&frame[start_byte..end_byte]);
         self.current_height += best_delta;
-        // Update anchor frame to the newly stitched frame
         self.anchor_frame = Some(frame.to_vec());
         self.stitched_count += 1;
         true
     }
 
     /// Fast check if consecutive frames are essentially identical (cursor blink, idle)
-    fn is_stationary(&self, anchor: &[u8], curr: &[u8]) -> bool {
+    fn is_stationary(&self, anchor: &[u8], curr: &[u8], left_m: usize, right_m: usize) -> bool {
         let w = self.width;
         let h = self.height;
         let row_step = 4;
@@ -159,7 +161,7 @@ impl FrameStitcher {
 
         for r in (0..h).step_by(row_step) {
             let row_off = r * w * 4;
-            for c in (0..w).step_by(col_step) {
+            for c in (left_m..right_m).step_by(col_step) {
                 let idx = row_off + c * 4;
                 let dr = (anchor[idx] as i32 - curr[idx] as i32).abs();
                 let dg = (anchor[idx + 1] as i32 - curr[idx + 1] as i32).abs();
@@ -174,16 +176,17 @@ impl FrameStitcher {
         }
 
         let avg = if count > 0 { diff_sum as f64 / count as f64 } else { 0.0 };
-        // Stationary only if whole-frame average is negligible AND no significant pixel changed
-        avg < 0.4 && max_diff < 20
+        avg < 0.4 && max_diff < 18
     }
 
-    /// Compute full-overlap SAD and ink-weighted SAD for a given downward delta shift (coarse pass)
+    /// Compute full-overlap SAD and ink-weighted SAD (coarse pass)
     fn compute_overlap_metrics(
         &self,
         anchor: &[u8],
         curr: &[u8],
         delta: usize,
+        left_m: usize,
+        right_m: usize,
     ) -> (f64, f64, usize) {
         let w = self.width;
         let overlap_h = self.height - delta;
@@ -192,7 +195,6 @@ impl FrameStitcher {
 
         let mut total_diff = 0u64;
         let mut total_samples = 0u64;
-
         let mut ink_diff = 0u64;
         let mut ink_samples = 0usize;
 
@@ -200,7 +202,7 @@ impl FrameStitcher {
             let a_off = (delta + r) * w * 4;
             let c_off = r * w * 4;
 
-            for c in (0..w).step_by(col_step) {
+            for c in (left_m..right_m).step_by(col_step) {
                 let ai = a_off + c * 4;
                 let ci = c_off + c * 4;
 
@@ -220,7 +222,6 @@ impl FrameStitcher {
                 total_diff += d_sum;
                 total_samples += 3;
 
-                // Ink/Text detector: pixels that are not pure background (brightness < 235)
                 let a_lum = (ar + ag + ab) / 3;
                 let c_lum = (cr + cg + cb) / 3;
                 if a_lum < 235 || c_lum < 235 {
@@ -245,12 +246,14 @@ impl FrameStitcher {
         (total_sad, ink_sad, ink_samples)
     }
 
-    /// Stage 2: Fine full-resolution evaluation (row_step = 1) for sub-pixel/exact integer precision
+    /// Stage 2: Fine full-resolution evaluation (row_step = 1) for exact integer precision
     fn compute_fine_overlap_metrics(
         &self,
         anchor: &[u8],
         curr: &[u8],
         delta: usize,
+        left_m: usize,
+        right_m: usize,
     ) -> (f64, f64, usize) {
         let w = self.width;
         let overlap_h = self.height - delta;
@@ -259,7 +262,6 @@ impl FrameStitcher {
 
         let mut total_diff = 0u64;
         let mut total_samples = 0u64;
-
         let mut ink_diff = 0u64;
         let mut ink_samples = 0usize;
 
@@ -267,7 +269,7 @@ impl FrameStitcher {
             let a_off = (delta + r) * w * 4;
             let c_off = r * w * 4;
 
-            for c in (0..w).step_by(col_step) {
+            for c in (left_m..right_m).step_by(col_step) {
                 let ai = a_off + c * 4;
                 let ci = c_off + c * 4;
 

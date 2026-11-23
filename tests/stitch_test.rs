@@ -135,7 +135,7 @@ fn test_cross_page_jump_rejection() {
     let img7 = image::open(p7).unwrap().to_rgba8();
     let img10 = image::open(p10).unwrap().to_rgba8();
 
-    let (w, h) = img7.dimensions();
+    let (w, _h) = img7.dimensions();
     let view_h = 500u32;
 
     let mut stitcher = FrameStitcher::new(w, view_h);
