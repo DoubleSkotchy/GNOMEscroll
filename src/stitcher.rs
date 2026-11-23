@@ -1,11 +1,10 @@
-use rayon::prelude::*;
-
 pub struct FrameStitcher {
     width: usize,
     height: usize,
     canvas: Vec<u8>,
     pub current_height: usize,
     anchor_frame: Option<Vec<u8>>,
+    anchor_profiles: Option<(Vec<f32>, Vec<f32>, Vec<f32>)>,
     max_delta: usize,
     pub stitched_count: usize,
 }
@@ -22,259 +21,229 @@ impl FrameStitcher {
             canvas: Vec::new(),
             current_height: 0,
             anchor_frame: None,
+            anchor_profiles: None,
             max_delta: max_delta.max(60),
             stitched_count: 0,
         }
     }
 
-    /// Process a new incoming RGBA frame from screencast.
-    ///
-    /// Uses a 3-stage approach inspired by ShareX / Shottr:
-    ///  1. Extract a ROI strip from the bottom of the anchor frame
-    ///  2. Search for that strip in the top portion of the new frame (coarse → fine)
-    ///  3. Validate the match with full-overlap verification + anti-superimposition gates
+    /// Process a new incoming RGBA frame from screencast
     pub fn feed_frame(&mut self, frame: &[u8]) -> bool {
         let expected_size = self.width * self.height * 4;
         if frame.len() != expected_size {
             return false;
         }
 
+        // Margins to exclude scrollbar (right) and window borders (left)
+        let left_m = 16.min(self.width / 12);
+        let right_m = self.width.saturating_sub(40.min(self.width / 10));
+        if right_m <= left_m + 50 {
+            return false;
+        }
+
+        // Compute 3-strip 1D vertical luminance profile for the incoming frame
+        let curr_profiles = self.compute_profiles(frame, left_m, right_m);
+
         // 1. First frame: initialize canvas and anchor
         if self.anchor_frame.is_none() {
             self.canvas.extend_from_slice(frame);
             self.current_height = self.height;
             self.anchor_frame = Some(frame.to_vec());
+            self.anchor_profiles = Some(curr_profiles);
             self.stitched_count = 1;
             return true;
         }
 
         let anchor = self.anchor_frame.as_ref().unwrap();
-
-        // Margins to exclude scrollbar (right) and window border (left)
-        let left_m = 16.min(self.width / 12);
-        let right_m = self.width.saturating_sub(32.min(self.width / 12));
-        if right_m <= left_m + 50 {
-            return false;
-        }
+        let (a_prof_l, a_prof_c, a_prof_r) = self.anchor_profiles.as_ref().unwrap();
+        let (c_prof_l, c_prof_c, c_prof_r) = &curr_profiles;
 
         let max_d = self.max_delta.min(self.height.saturating_sub(25));
-        if max_d < 1 {
+        if max_d < 2 {
             return false;
         }
 
         // ══════════════════════════════════════════════════════════════
-        // STAGE 1: ROI Strip Matching (fast, robust)
+        // STAGE 1: 1D Profile Scan for delta \in [0, max_d] (~0.03ms)
         // ══════════════════════════════════════════════════════════════
-        // Extract a strip of rows from the BOTTOM of the anchor.
-        // Search for where this strip appears in the TOP of the new frame.
-        // If anchor scrolled down by delta pixels, then:
-        //   anchor[delta..H] should match frame[0..H-delta]
-        // Equivalently: anchor_bottom_strip starting at row (H - strip_h)
-        //   should appear in frame at row (H - strip_h - delta).
-        //
-        // We use a strip from the bottom 15% of the anchor (but at least 20 rows,
-        // at most 80 rows) as the ROI template.
+        let mut profile_errors: Vec<(usize, f32)> = Vec::with_capacity(max_d + 1);
 
-        let strip_h = ((self.height as f64 * 0.15) as usize).clamp(20, 80.min(self.height / 3));
-        let strip_start_in_anchor = self.height - strip_h; // row index in anchor
+        for delta in 0..=max_d {
+            let overlap = self.height - delta;
+            let mut sum_diff = 0.0f32;
 
-        // For each candidate delta, the strip should appear in the new frame at:
-        //   frame_row = strip_start_in_anchor - delta
-        // which means delta can be at most strip_start_in_anchor (so frame_row >= 0).
+            // Full row evaluation (row_step = 1) for exact parity-free matching
+            for r in 0..overlap {
+                let a_r = delta + r;
+                let f_r = r;
 
-        let effective_max_d = max_d.min(strip_start_in_anchor);
+                let dl = (a_prof_l[a_r] - c_prof_l[f_r]).abs();
+                let dc = (a_prof_c[a_r] - c_prof_c[f_r]).abs();
+                let dr = (a_prof_r[a_r] - c_prof_r[f_r]).abs();
 
-        // ── Coarse pass: row_step=2, col_step=4 ──
-        let coarse_results: Vec<(usize, f64)> = (0..=effective_max_d)
-            .into_par_iter()
-            .map(|delta| {
-                let sad = self.strip_sad(
-                    anchor, frame, delta, strip_start_in_anchor, strip_h,
-                    left_m, right_m, 2, 4,
-                );
-                (delta, sad)
-            })
-            .collect();
+                sum_diff += dl + dc + dr;
+            }
 
-        if coarse_results.is_empty() {
-            return false;
+            let avg_err = if overlap > 0 { sum_diff / overlap as f32 } else { 255.0 };
+            profile_errors.push((delta, avg_err));
         }
 
-        // Find top candidates
-        let mut sorted = coarse_results;
-        sorted.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut sorted_candidates = profile_errors;
+        sorted_candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-        let coarse_best_delta = sorted[0].0;
-        let coarse_best_sad = sorted[0].1;
+        // ══════════════════════════════════════════════════════════════
+        // STAGE 2: 2D Full-Overlap SAD on Top Candidates (~0.25ms)
+        // ══════════════════════════════════════════════════════════════
+        let top_k = 10.min(sorted_candidates.len());
+        let mut tested_deltas = std::collections::HashSet::new();
+        let mut candidates_to_test = Vec::new();
 
-        // Stationary detection: delta=0 is best and near-zero error
-        if coarse_best_delta == 0 && coarse_best_sad < 1.5 {
-            return false;
+        // Always include delta=0 in candidate set to verify stationary condition
+        candidates_to_test.push(0);
+        tested_deltas.insert(0);
+
+        for &(d, _) in &sorted_candidates[..top_k] {
+            for neighbor in [d.saturating_sub(1), d, (d + 1).min(max_d)] {
+                if tested_deltas.insert(neighbor) {
+                    candidates_to_test.push(neighbor);
+                }
+            }
         }
 
-        // If coarse best SAD is way too high, no match exists
-        if coarse_best_sad > 12.0 {
-            return false;
-        }
-
-        // ── Fine pass: row_step=1, col_step=1, around best ±3 ──
-        let fine_start = coarse_best_delta.saturating_sub(3).max(1);
-        let fine_end = (coarse_best_delta + 3).min(effective_max_d);
-
-        let mut best_delta = coarse_best_delta;
+        let mut best_delta = 0usize;
         let mut best_sad = f64::MAX;
+        let mut best_ink_sad = f64::MAX;
+        let mut best_ink_count = 0usize;
 
-        for d in fine_start..=fine_end {
-            let sad = self.strip_sad(
-                anchor, frame, d, strip_start_in_anchor, strip_h,
-                left_m, right_m, 1, 1,
-            );
+        // row_step = 1 ensures pixel-perfect integer alignment without parity bias!
+        for &d in &candidates_to_test {
+            let (sad, ink_sad, ink_count) =
+                self.compute_overlap_metrics(anchor, frame, d, left_m, right_m, 1, 4);
+
             if sad < best_sad {
                 best_sad = sad;
+                best_ink_sad = ink_sad;
+                best_ink_count = ink_count;
                 best_delta = d;
             }
         }
 
-        if best_delta == 0 {
+        // If delta=0 won or delta is too small, the viewport is stationary
+        if best_delta < 2 {
             return false;
         }
 
         // ══════════════════════════════════════════════════════════════
-        // STAGE 2: Full-Overlap Verification
+        // STAGE 3: Robust Validation Gates
         // ══════════════════════════════════════════════════════════════
-        // Verify the ENTIRE overlapping region, not just the strip.
-        // anchor[best_delta .. H] should match frame[0 .. H - best_delta]
-
-        let overlap_h = self.height - best_delta;
-        let (full_sad, ink_sad, ink_count) =
-            self.full_overlap_metrics(anchor, frame, best_delta, overlap_h, left_m, right_m);
-
-        // ── Validation Gates ──
-        // Gate A: Global overlap error — must be very low for a correct match
-        if full_sad > 4.0 {
+        // Gate A: Global overlap difference threshold
+        // Genuinely matching frames have SAD < 4.0. Discontinuous jumps have SAD > 25.0.
+        if best_sad > 6.0 {
             return false;
         }
 
-        // Gate B: Anti-superimposition — if there's significant ink (text/lines),
-        // the ink-only SAD must also be low. High ink SAD means text from two
-        // different positions is overlapping.
-        if ink_count >= 20 && ink_sad > 12.0 {
+        // Gate B: Text/Ink anti-superimposition gate
+        // Superimposed lines (like 8.2 on 8.3) produce ink SAD > 35.0. Genuine match is < 12.0.
+        if best_ink_count >= 25 && best_ink_sad > 20.0 {
             return false;
         }
 
-        // Gate C: If barely any features, require extremely tight match
-        if ink_count < 15 && full_sad > 0.6 {
+        // Gate C: Minimum feature verification for low-contrast / sparse regions
+        if best_ink_count < 10 && best_sad > 1.2 {
             return false;
         }
 
-        // Gate D: Uniqueness — reject if there's a close runner-up at a very
-        // different delta (periodic text patterns can cause this)
-        if sorted.len() > 1 {
-            let best_coarse_sad_refined = best_sad; // fine-pass SAD for best delta
-            for other in &sorted[1..5.min(sorted.len())] {
-                let d_diff = (other.0 as isize - best_delta as isize).unsigned_abs();
-                if d_diff > 6 && other.1 < coarse_best_sad * 1.35 && full_sad > 1.8 {
-                    // Another delta far away scored nearly as well → ambiguous
-                    return false;
-                }
-                // Also check: if the best coarse is barely better than many
-                // runners-up, it's probably periodic content
-                if d_diff > 3 && other.1 < best_coarse_sad_refined * 1.08 && full_sad > 1.0 {
-                    return false;
-                }
-            }
-        }
-
         // ══════════════════════════════════════════════════════════════
-        // STAGE 3: Append new content
+        // STAGE 4: Confirmed Match — Append Newly Revealed Rows
         // ══════════════════════════════════════════════════════════════
-        let new_start_row = self.height - best_delta;
-        let new_start_byte = new_start_row * self.width * 4;
-        let new_end_byte = self.height * self.width * 4;
+        let start_row = self.height - best_delta;
+        let start_byte = start_row * self.width * 4;
+        let end_byte = self.height * self.width * 4;
 
-        self.canvas.extend_from_slice(&frame[new_start_byte..new_end_byte]);
+        self.canvas.extend_from_slice(&frame[start_byte..end_byte]);
         self.current_height += best_delta;
         self.anchor_frame = Some(frame.to_vec());
+        self.anchor_profiles = Some(curr_profiles);
         self.stitched_count += 1;
         true
     }
 
-    /// Compute SAD between a strip in the anchor and the corresponding position in the new frame.
-    /// For delta d: anchor rows [strip_start .. strip_start + strip_h]
-    ///              match against frame rows [strip_start - d .. strip_start - d + strip_h]
-    #[inline]
-    fn strip_sad(
+    /// Compute 3 vertical strips (Left, Center, Right) 1D row luminance profiles
+    fn compute_profiles(
+        &self,
+        frame: &[u8],
+        left_m: usize,
+        right_m: usize,
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+        let w = self.width;
+        let h = self.height;
+
+        let total_w = right_m - left_m;
+        let strip_w = total_w / 3;
+
+        let l_start = left_m;
+        let l_end = left_m + strip_w;
+        let c_start = l_end;
+        let c_end = c_start + strip_w;
+        let r_start = c_end;
+        let r_end = right_m;
+
+        let mut prof_l = Vec::with_capacity(h);
+        let mut prof_c = Vec::with_capacity(h);
+        let mut prof_r = Vec::with_capacity(h);
+
+        for row in 0..h {
+            let row_off = row * w * 4;
+
+            let mut sum_l = 0u32;
+            let mut count_l = 0u32;
+            for col in (l_start..l_end).step_by(4) {
+                let idx = row_off + col * 4;
+                sum_l += frame[idx] as u32 + frame[idx + 1] as u32 + frame[idx + 2] as u32;
+                count_l += 3;
+            }
+
+            let mut sum_c = 0u32;
+            let mut count_c = 0u32;
+            for col in (c_start..c_end).step_by(4) {
+                let idx = row_off + col * 4;
+                sum_c += frame[idx] as u32 + frame[idx + 1] as u32 + frame[idx + 2] as u32;
+                count_c += 3;
+            }
+
+            let mut sum_r = 0u32;
+            let mut count_r = 0u32;
+            for col in (r_start..r_end).step_by(4) {
+                let idx = row_off + col * 4;
+                sum_r += frame[idx] as u32 + frame[idx + 1] as u32 + frame[idx + 2] as u32;
+                count_r += 3;
+            }
+
+            prof_l.push(if count_l > 0 { sum_l as f32 / count_l as f32 } else { 255.0 });
+            prof_c.push(if count_c > 0 { sum_c as f32 / count_c as f32 } else { 255.0 });
+            prof_r.push(if count_r > 0 { sum_r as f32 / count_r as f32 } else { 255.0 });
+        }
+
+        (prof_l, prof_c, prof_r)
+    }
+
+    /// Compute 2D full-overlap SAD and ink-only SAD
+    fn compute_overlap_metrics(
         &self,
         anchor: &[u8],
         curr: &[u8],
         delta: usize,
-        strip_start: usize,  // row in anchor where strip begins
-        strip_h: usize,
         left_m: usize,
         right_m: usize,
         row_step: usize,
         col_step: usize,
-    ) -> f64 {
-        let w = self.width;
-        // Frame row = strip_start - delta + r
-        let frame_row_start = strip_start.checked_sub(delta);
-        if frame_row_start.is_none() {
-            return 255.0;
-        }
-        let frame_row_start = frame_row_start.unwrap();
-
-        let mut total_diff = 0u64;
-        let mut total_samples = 0u64;
-
-        for r in (0..strip_h).step_by(row_step) {
-            let a_row = strip_start + r;
-            let f_row = frame_row_start + r;
-
-            if a_row >= self.height || f_row >= self.height {
-                break;
-            }
-
-            let a_off = a_row * w * 4;
-            let f_off = f_row * w * 4;
-
-            for c in (left_m..right_m).step_by(col_step) {
-                let ai = a_off + c * 4;
-                let fi = f_off + c * 4;
-
-                let dr = (anchor[ai] as i32 - curr[fi] as i32).unsigned_abs() as u64;
-                let dg = (anchor[ai + 1] as i32 - curr[fi + 1] as i32).unsigned_abs() as u64;
-                let db = (anchor[ai + 2] as i32 - curr[fi + 2] as i32).unsigned_abs() as u64;
-
-                total_diff += dr + dg + db;
-                total_samples += 3;
-            }
-        }
-
-        if total_samples > 0 {
-            total_diff as f64 / total_samples as f64
-        } else {
-            255.0
-        }
-    }
-
-    /// Full-overlap verification: compute global SAD + ink-only SAD across
-    /// the entire overlapping rectangle.
-    fn full_overlap_metrics(
-        &self,
-        anchor: &[u8],
-        curr: &[u8],
-        delta: usize,
-        overlap_h: usize,
-        left_m: usize,
-        right_m: usize,
     ) -> (f64, f64, usize) {
         let w = self.width;
-        // row_step=2, col_step=2 for speed (still evaluates ~25% of all pixels)
-        let row_step = 2;
-        let col_step = 2;
+        let overlap_h = self.height - delta;
 
         let mut total_diff = 0u64;
         let mut total_samples = 0u64;
+
         let mut ink_diff = 0u64;
         let mut ink_samples = 0usize;
 
@@ -294,15 +263,15 @@ impl FrameStitcher {
                 let cg = curr[ci + 1] as i32;
                 let cb = curr[ci + 2] as i32;
 
-                let dr = (ar - cr).unsigned_abs() as u64;
-                let dg = (ag - cg).unsigned_abs() as u64;
-                let db = (ab - cb).unsigned_abs() as u64;
+                let dr = (ar - cr).abs() as u64;
+                let dg = (ag - cg).abs() as u64;
+                let db = (ab - cb).abs() as u64;
 
                 let d_sum = dr + dg + db;
                 total_diff += d_sum;
                 total_samples += 3;
 
-                // Ink detection: if either pixel is non-white (lum < 235)
+                // Ink sampling: non-background text/lines (lum < 235)
                 let a_lum = (ar + ag + ab) / 3;
                 let c_lum = (cr + cg + cb) / 3;
                 if a_lum < 235 || c_lum < 235 {

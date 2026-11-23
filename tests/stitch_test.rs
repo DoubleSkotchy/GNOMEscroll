@@ -154,3 +154,73 @@ fn test_cross_page_jump_rejection() {
     assert_eq!(stitcher.current_height, initial_h, "Canvas must not be corrupted on rejected jump");
     println!("✅ Verified: Discontinuous page jump safely rejected without canvas corruption!");
 }
+
+
+#[test]
+fn test_smooth_scrolling_and_pauses() {
+    let pdf_path = std::path::Path::new("/tmp/toc_page-007.png");
+    if !pdf_path.exists() {
+        return;
+    }
+
+    let img = match image::open(pdf_path) {
+        Ok(i) => i.to_rgba8(),
+        Err(_) => return,
+    };
+
+    let (width, height) = img.dimensions();
+    let view_h = 500usize;
+    if height < 1200 {
+        return;
+    }
+
+    let raw = img.into_raw();
+    let mut stitcher = FrameStitcher::new(width, view_h as u32);
+
+    // Realistic trackpad smooth scroll with pause/idle frames in between
+    let events: Vec<(usize, bool)> = vec![
+        (0, true),    // Frame 0: Initial
+        (0, false),   // Frame 0 repeated (idle / cursor blink) -> must NOT stitch
+        (0, false),   // Frame 0 repeated again -> must NOT stitch
+        (8, true),    // Frame 1: Small scroll 8px
+        (8, false),   // Pause
+        (22, true),   // Scroll 14px (y=22)
+        (45, true),   // Scroll 23px (y=45)
+        (45, false),  // Pause
+        (90, true),   // Scroll 45px (y=90)
+        (160, true),  // Scroll 70px (y=160)
+        (260, true),  // Scroll 100px (y=260)
+    ];
+
+    let mut actual_stitched = 0usize;
+    for (y, should_stitch) in events {
+        let start_byte = y * width as usize * 4;
+        let end_byte = (y + view_h) * width as usize * 4;
+        let frame = &raw[start_byte..end_byte];
+
+        let stitched = stitcher.feed_frame(frame);
+        assert_eq!(stitched, should_stitch, "At y={}, expected stitched={} but got {}", y, should_stitch, stitched);
+        if stitched {
+            actual_stitched += 1;
+        }
+    }
+
+    assert_eq!(actual_stitched, 7); // 7 unique scroll positions stitched
+    let (final_w, final_h, count, canvas) = stitcher.finish();
+    assert_eq!(final_w, width);
+    assert_eq!(final_h, (260 + view_h) as u32);
+    assert_eq!(count, 7);
+
+    // Pixel-perfect check
+    let gt = &raw[0..((260 + view_h) * width as usize * 4)];
+    assert_eq!(canvas.len(), gt.len());
+    let mut max_diff = 0i32;
+    for (&c, &g) in canvas.iter().zip(gt.iter()) {
+        let diff = (c as i32 - g as i32).abs();
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+    assert_eq!(max_diff, 0, "Smooth trackpad scroll with pauses must be 100% pixel-perfect!");
+    println!("✅ Verified: Smooth scrolling with pauses passed with 0 pixel difference!");
+}
