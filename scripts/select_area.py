@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
+"""GNOMEscroll Area Selector — GTK4 fullscreen overlay with zero visual artifacts."""
 import sys
+import math
 import cairo
 import gi
 
 gi.require_version('Gtk', '4.0')
 from gi.repository import Gtk, Gdk, GLib
+
 
 class AreaSelector(Gtk.ApplicationWindow):
     def __init__(self, app):
@@ -19,7 +22,6 @@ class AreaSelector(Gtk.ApplicationWindow):
         self.curr_y = None
         self.confirmed = False
 
-        # Set crosshair cursor
         self.set_cursor_from_name('crosshair')
 
         # Transparent window CSS
@@ -100,55 +102,81 @@ class AreaSelector(Gtk.ApplicationWindow):
                     self.get_application().quit()
         return False
 
+    @staticmethod
+    def _draw_rounded_rect(cr, x, y, w, h, r):
+        """Draw a rounded rectangle as a single self-contained sub-path."""
+        cr.new_sub_path()
+        cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
+        cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
+        cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
+        cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
+        cr.close_path()
+
     def on_draw(self, drawing_area, cr, screen_w, screen_h):
+        # ── 1. Dark overlay ──────────────────────────────────────────
+        # Always start from a completely blank path state
+        cr.save()
         cr.new_path()
 
-        # 1. Dark overlay outside the selection
         if self.start_x is not None and self.curr_x is not None:
             x = min(self.start_x, self.curr_x)
             y = min(self.start_y, self.curr_y)
             w = abs(self.curr_x - self.start_x)
             h = abs(self.curr_y - self.start_y)
 
-            # Draw 4 clean non-overlapping rectangles outside the selection:
-            # The inside region [x, y, w, h] is NEVER drawn upon - 100% transparent and clear!
+            # 4 non-overlapping rectangles around selection — each is a separate fill
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.35)
-            if y > 0:
-                cr.rectangle(0, 0, screen_w, y)
-            if y + h < screen_h:
-                cr.rectangle(0, y + h, screen_w, screen_h - (y + h))
-            if x > 0:
-                cr.rectangle(0, y, x, h)
-            if x + w < screen_w:
-                cr.rectangle(x + w, y, screen_w - (x + w), h)
-            cr.fill()
 
-            if w >= 2 and h >= 2:
-                # Blue selection border
+            # Top band
+            if y > 0:
                 cr.new_path()
-                cr.set_source_rgba(0.21, 0.52, 0.89, 0.95) # #3584e4
+                cr.rectangle(0, 0, screen_w, y)
+                cr.fill()
+            # Bottom band
+            if y + h < screen_h:
+                cr.new_path()
+                cr.rectangle(0, y + h, screen_w, screen_h - (y + h))
+                cr.fill()
+            # Left band
+            if x > 0:
+                cr.new_path()
+                cr.rectangle(0, y, x, h)
+                cr.fill()
+            # Right band
+            if x + w < screen_w:
+                cr.new_path()
+                cr.rectangle(x + w, y, screen_w - (x + w), h)
+                cr.fill()
+
+            # ── 2. Blue selection border ─────────────────────────────
+            if w >= 2 and h >= 2:
+                cr.new_path()
+                cr.set_source_rgba(0.21, 0.52, 0.89, 0.95)
                 cr.set_line_width(2.0)
                 cr.rectangle(x, y, w, h)
                 cr.stroke()
 
-            # Corner handles
+            # ── 3. White corner handles ──────────────────────────────
             if w >= 24 and h >= 24:
                 handle_len = min(14.0, w / 3.0, h / 3.0)
                 cr.new_path()
                 cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
                 cr.set_line_width(3.0)
+                cr.set_line_cap(cairo.LINE_CAP_ROUND)
 
-                # Top-left
-                cr.move_to(x, y + handle_len); cr.line_to(x, y); cr.line_to(x + handle_len, y)
-                # Top-right
-                cr.move_to(x + w - handle_len, y); cr.line_to(x + w, y); cr.line_to(x + w, y + handle_len)
-                # Bottom-left
-                cr.move_to(x, y + h - handle_len); cr.line_to(x, y + h); cr.line_to(x + handle_len, y + h)
-                # Bottom-right
-                cr.move_to(x + w - handle_len, y + h); cr.line_to(x + w, y + h); cr.line_to(x + w, y + h - handle_len)
+                for (cx, cy, dx1, dy1, dx2, dy2) in [
+                    (x, y, handle_len, 0, 0, handle_len),              # top-left
+                    (x + w, y, -handle_len, 0, 0, handle_len),         # top-right
+                    (x, y + h, handle_len, 0, 0, -handle_len),         # bottom-left
+                    (x + w, y + h, -handle_len, 0, 0, -handle_len),    # bottom-right
+                ]:
+                    cr.move_to(cx + dx1, cy + dy1)
+                    cr.line_to(cx, cy)
+                    cr.line_to(cx + dx2, cy + dy2)
+
                 cr.stroke()
 
-            # Measurement pill badge
+            # ── 4. Dimension badge ───────────────────────────────────
             if w >= 30 and h >= 30:
                 badge_text = f"{int(w)} × {int(h)} px"
                 cr.set_font_size(13.0)
@@ -163,56 +191,48 @@ class AreaSelector(Gtk.ApplicationWindow):
                 bx = max(10.0, min(screen_w - bw - 10.0, bx))
                 by = max(10.0, min(screen_h - bh - 10.0, by))
 
-                # Isolated new path for badge capsule
+                radius = bh / 2.0
                 cr.new_path()
                 cr.set_source_rgba(0.12, 0.12, 0.12, 0.92)
-                radius = bh / 2.0
-                cr.arc(bx + radius, by + radius, radius, 1.5707, 3.1415)
-                cr.arc(bx + radius, by + bh - radius, radius, 3.1415, 4.7123)
-                cr.arc(bx + bw - radius, by + bh - radius, radius, 4.7123, 6.2831)
-                cr.arc(bx + bw - radius, by + radius, radius, 0.0, 1.5707)
-                cr.close_path()
+                self._draw_rounded_rect(cr, bx, by, bw, bh, radius)
                 cr.fill()
 
                 cr.new_path()
                 cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
                 cr.move_to(bx + 10.0, by + 18.0)
                 cr.show_text(badge_text)
+                cr.new_path()
         else:
-            # No selection yet: draw uniform dark overlay
+            # No selection yet — uniform dark overlay
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.35)
             cr.rectangle(0, 0, screen_w, screen_h)
             cr.fill()
 
-        # 2. Top instruction pill
-        banner_text = "📸 Drag to select capture region  •  Press Esc to cancel"
+        cr.restore()
+
+        # ── 5. Top instruction banner (always drawn, isolated context) ──
+        cr.save()
+        cr.new_path()
+
+        banner_text = "Drag to select capture region  —  Esc to cancel"
         cr.set_font_size(13.0)
         extents = cr.text_extents(banner_text)
         bw = extents.width + 32.0
         bh = 32.0
         bx = (screen_w - bw) / 2.0
         by = 28.0
-
-        # Isolated new path for banner capsule
-        cr.new_path()
-        cr.set_source_rgba(0.12, 0.12, 0.12, 0.88)
         radius = bh / 2.0
-        cr.arc(bx + radius, by + radius, radius, 1.5707, 3.1415)
-        cr.arc(bx + radius, by + bh - radius, radius, 3.1415, 4.7123)
-        cr.arc(bx + bw - radius, by + bh - radius, radius, 4.7123, 6.2831)
-        cr.arc(bx + bw - radius, by + radius, radius, 0.0, 1.5707)
-        cr.close_path()
+
+        # Banner background
+        cr.set_source_rgba(0.12, 0.12, 0.12, 0.88)
+        self._draw_rounded_rect(cr, bx, by, bw, bh, radius)
         cr.fill()
 
         # Banner border
         cr.new_path()
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.15)
         cr.set_line_width(1.0)
-        cr.arc(bx + radius, by + radius, radius, 1.5707, 3.1415)
-        cr.arc(bx + radius, by + bh - radius, radius, 3.1415, 4.7123)
-        cr.arc(bx + bw - radius, by + bh - radius, radius, 4.7123, 6.2831)
-        cr.arc(bx + bw - radius, by + radius, radius, 0.0, 1.5707)
-        cr.close_path()
+        self._draw_rounded_rect(cr, bx, by, bw, bh, radius)
         cr.stroke()
 
         # Banner text
@@ -220,6 +240,10 @@ class AreaSelector(Gtk.ApplicationWindow):
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.95)
         cr.move_to(bx + 16.0, by + 21.0)
         cr.show_text(banner_text)
+        cr.new_path()
+
+        cr.restore()
+
 
 def main():
     app = Gtk.Application(application_id='com.gnomescroll.selector')
