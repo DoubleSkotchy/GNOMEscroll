@@ -23,9 +23,8 @@ chmod +x "$BIN_DIR/gnomescroll"
 # 3. Install scripts & assets
 echo "📁 Installing support files to $SHARE_DIR..."
 mkdir -p "$SHARE_DIR"
-cp -f "$SCRIPT_DIR/scripts/floating_pill.py" "$SHARE_DIR/floating_pill.py"
 cp -f "$SCRIPT_DIR/scripts/select_area.py" "$SHARE_DIR/select_area.py"
-chmod +x "$SHARE_DIR/floating_pill.py" "$SHARE_DIR/select_area.py"
+chmod +x "$SHARE_DIR/select_area.py"
 
 # 4. Install GNOME Shell Extension
 echo "🔌 Installing GNOME Shell Extension to $EXT_DIR..."
