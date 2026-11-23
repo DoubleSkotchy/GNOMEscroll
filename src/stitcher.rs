@@ -14,8 +14,8 @@ impl FrameStitcher {
     pub fn new(width: u32, height: u32) -> Self {
         let w = width as usize;
         let h = height as usize;
-        // Search up to 45% of the frame height per step
-        let max_delta = (h as f64 * 0.45) as usize;
+        // Search up to 35% of the frame height per step (e.g. up to 280px on 800h)
+        let max_delta = (h as f64 * 0.35) as usize;
 
         Self {
             width: w,
@@ -46,16 +46,21 @@ impl FrameStitcher {
 
         let prev = self.prev_frame.as_ref().unwrap();
 
-        // 1. Fast check if frame is stationary (no scroll)
+        // 1. Fast check if frame is stationary (no scroll, cursor blink, idle)
         if self.is_stationary(prev, frame) {
             return false;
         }
 
         // 2. High-precision 2D Template Matching
-        // Template is taken from the lower half of prev_frame: [y0 .. y0 + template_h]
-        let template_h = self.height / 2;
-        let y0 = self.height / 2;
-        let max_d = self.max_delta.min(y0);
+        // Avoid sticky top headers (top 30%) and sticky bottom footers (bottom 25%)
+        // Template spans [y0 - template_h .. y0] in the lower-middle content area
+        let template_h = (self.height as f64 * 0.35) as usize;
+        let y0 = (self.height as f64 * 0.70) as usize;
+        let max_d = self.max_delta.min(y0 - template_h);
+
+        if max_d == 0 {
+            return false;
+        }
 
         // Search in parallel across candidate scroll shifts delta \in [1, max_d]
         let best_match: Option<(usize, f64)> = (1..=max_d)
@@ -123,22 +128,22 @@ impl FrameStitcher {
         template_h: usize,
     ) -> f64 {
         let w = self.width;
-        let row_step = 3;
+        let row_step = 2;
         let col_step = 4;
         let mut total_diff = 0u64;
         let mut samples = 0u64;
 
         for r in (0..template_h).step_by(row_step) {
-            let p_row_off = (prev_y0 + r) * w * 4;
-            let c_row_off = (curr_y0 + r) * w * 4;
+            let p_row_off = (prev_y0 - template_h + r) * w * 4;
+            let c_row_off = (curr_y0 - template_h + r) * w * 4;
 
             for c in (0..w).step_by(col_step) {
                 let pi = p_row_off + c * 4;
                 let ci = c_row_off + c * 4;
 
                 let dr = (prev[pi] as i32 - curr[ci] as i32).abs() as u64;
-                let dg = (prev[pi + 1] as i32 - curr[pi + 1] as i32).abs() as u64;
-                let db = (prev[pi + 2] as i32 - curr[pi + 2] as i32).abs() as u64;
+                let dg = (prev[pi + 1] as i32 - curr[ci + 1] as i32).abs() as u64;
+                let db = (prev[pi + 2] as i32 - curr[ci + 2] as i32).abs() as u64;
                 total_diff += dr + dg + db;
                 samples += 3;
             }
