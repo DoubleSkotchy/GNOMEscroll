@@ -101,6 +101,11 @@ fn get_primary_monitor_geometry() -> (i32, i32, u32, u32) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // 0. Toggle check: if an instance is already recording, signal it to finish!
+    if ui::Controller::handle_toggle_instance() {
+        return Ok(());
+    }
+
     let args = Args::parse();
 
     let (x, y, width, height) = match args.area {
@@ -141,8 +146,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // 2. Start controller (terminal listener + floating GTK pill)
-    let controller = ui::Controller::start();
+    // 2. Start controller (terminal listener + toggle FIFO + floating GTK pill)
+    let controller = ui::Controller::start(x, y, width, height);
     let stop_flag = controller.stop_flag();
 
     // 3. Start PipeWire frame ingestion stream

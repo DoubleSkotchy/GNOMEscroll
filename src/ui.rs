@@ -1,11 +1,14 @@
 use std::fs::{remove_file, File};
-use std::io::{BufRead, BufReader};
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::thread;
+
+pub const CONTROL_FIFO: &str = "/tmp/gnomescroll_control.fifo";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserAction {
@@ -16,16 +19,64 @@ pub enum UserAction {
 pub struct Controller {
     action_rx: Receiver<UserAction>,
     stop_flag: Arc<AtomicBool>,
-    fifo_path: Option<PathBuf>,
     pill_child: Option<Child>,
 }
 
 impl Controller {
-    pub fn start() -> Self {
+    /// Check if another instance is already running; if so, signal it to finish and exit
+    pub fn handle_toggle_instance() -> bool {
+        if Path::new(CONTROL_FIFO).exists() {
+            // Attempt non-blocking write to signal active instance
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .write(true)
+                .custom_flags(libc::O_NONBLOCK)
+                .open(CONTROL_FIFO)
+            {
+                let _ = writeln!(file, "DONE");
+                let _ = file.flush();
+                println!("🏁 Signaled running GNOMEscroll instance to finish.");
+                return true;
+            } else {
+                // Stale FIFO without active reader; clean it up
+                let _ = remove_file(CONTROL_FIFO);
+            }
+        }
+        false
+    }
+
+    pub fn start(x: i32, y: i32, width: u32, height: u32) -> Self {
         let (tx, rx) = channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
 
-        // 1. Terminal keyboard listener (if TTY)
+        // 1. Clean up old FIFO and create new one
+        let _ = remove_file(CONTROL_FIFO);
+        let _ = Command::new("mkfifo").arg(CONTROL_FIFO).status();
+
+        // 2. FIFO listener thread (receives DONE / CANCEL from toggle shortcut or pill)
+        let tx_fifo = tx.clone();
+        let stop_flag_fifo = stop_flag.clone();
+        thread::spawn(move || {
+            while !stop_flag_fifo.load(Ordering::Relaxed) {
+                if let Ok(file) = File::open(CONTROL_FIFO) {
+                    let mut reader = BufReader::new(file);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_ok() {
+                        let trimmed = line.trim();
+                        if trimmed == "DONE" {
+                            let _ = tx_fifo.send(UserAction::Finish);
+                            break;
+                        } else if trimmed == "CANCEL" {
+                            let _ = tx_fifo.send(UserAction::Cancel);
+                            break;
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+        });
+
+        // 3. Terminal keyboard listener (if TTY)
         let tx_term = tx.clone();
         let stop_flag_term = stop_flag.clone();
         thread::spawn(move || {
@@ -52,43 +103,35 @@ impl Controller {
             }
         });
 
-        // 2. Floating pill controller
-        let pid = std::process::id();
-        let fifo_path = PathBuf::from(format!("/tmp/gnomescroll_fifo_{}", pid));
-        let _ = remove_file(&fifo_path);
-
-        // Create FIFO using mkfifo
-        let fifo_created = Command::new("mkfifo")
-            .arg(&fifo_path)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-
+        // 4. Decide whether to spawn on-screen floating pill widget
+        // If capture area is large (> 1200x700 or near fullscreen), DO NOT spawn the pill
+        // so it never appears in the screenshot! User can simply press Super+Ctrl+S or Enter.
+        let is_near_fullscreen = width >= 1200 || height >= 700;
         let mut pill_child = None;
-        if fifo_created {
-            // Find script path
-            let script_path = find_pill_script();
-            if let Some(path) = script_path {
-                if let Ok(child) = Command::new(path).arg(&fifo_path).spawn() {
+
+        if is_near_fullscreen {
+            // Send quick desktop notification so user knows capture is active
+            let _ = Command::new("notify-send")
+                .args([
+                    "-a", "GNOMEscroll",
+                    "-i", "camera-photo-symbolic",
+                    "-t", "3000",
+                    "Recording Started",
+                    "Scroll down, then press Super+Ctrl+S (or Enter) to finish."
+                ])
+                .spawn();
+        } else {
+            // Spawn floating pill outside capture area if script exists
+            if let Some(script_path) = find_pill_script() {
+                if let Ok(child) = Command::new(script_path)
+                    .arg(CONTROL_FIFO)
+                    .arg(x.to_string())
+                    .arg(y.to_string())
+                    .arg(width.to_string())
+                    .arg(height.to_string())
+                    .spawn()
+                {
                     pill_child = Some(child);
-
-                    let tx_fifo = tx.clone();
-                    let f_path = fifo_path.clone();
-
-                    thread::spawn(move || {
-                        if let Ok(file) = File::open(&f_path) {
-                            let mut reader = BufReader::new(file);
-                            let mut buf = String::new();
-                            if reader.read_line(&mut buf).is_ok() {
-                                let action = buf.trim();
-                                if action == "DONE" {
-                                    let _ = tx_fifo.send(UserAction::Finish);
-                                } else if action == "CANCEL" {
-                                    let _ = tx_fifo.send(UserAction::Cancel);
-                                }
-                            }
-                        }
-                    });
                 }
             }
         }
@@ -96,7 +139,6 @@ impl Controller {
         Self {
             action_rx: rx,
             stop_flag,
-            fifo_path: if fifo_created { Some(fifo_path) } else { None },
             pill_child,
         }
     }
@@ -111,13 +153,11 @@ impl Controller {
 }
 
 fn find_pill_script() -> Option<PathBuf> {
-    // 1. Current dir scripts/
     let local = PathBuf::from("scripts/floating_pill.py");
     if local.exists() {
         return Some(local.canonicalize().unwrap_or(local));
     }
 
-    // 2. Binary sibling directory
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let candidate = dir.join("scripts/floating_pill.py");
@@ -131,7 +171,6 @@ fn find_pill_script() -> Option<PathBuf> {
         }
     }
 
-    // 3. User local share
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home/kalpit"));
     let user_share = home.join(".local/share/gnomescroll/floating_pill.py");
     if user_share.exists() {
@@ -148,8 +187,6 @@ impl Drop for Controller {
             let _ = child.kill();
             let _ = child.wait();
         }
-        if let Some(path) = self.fifo_path.take() {
-            let _ = remove_file(path);
-        }
+        let _ = remove_file(CONTROL_FIFO);
     }
 }
