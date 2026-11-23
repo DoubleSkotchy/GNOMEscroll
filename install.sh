@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
+if [ "$EUID" -eq 0 ]; then
+    echo "❌ Please do NOT run install.sh with sudo!"
+    echo "GNOME extensions and user configurations must be installed as your regular user."
+    exit 1
+fi
+
 echo "======================================================"
 echo "        🚀 Installing GNOMEscroll"
 echo "======================================================"

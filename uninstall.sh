@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -e
 
+if [ "$EUID" -eq 0 ]; then
+    echo "❌ Please do NOT run uninstall.sh with sudo!"
+    echo "GNOME extensions and user configurations must be uninstalled as your regular user."
+    exit 1
+fi
+
 echo "======================================================"
 echo "        🗑️  Uninstalling GNOMEscroll"
 echo "======================================================"
@@ -20,7 +26,7 @@ rm -rf "$HOME/.local/share/gnomescroll"
 rm -f /tmp/gnomescroll*
 
 # 5. Disable and remove GNOME Shell Extension (both current and legacy UUIDs)
-for ext in "gnomescroll@doubleskotchy.github.com" "gnomescroll@kalpit.github.com"; do
+for ext in "gnomescroll@doubleskotchy.github.com"; do
     if which gnome-extensions >/dev/null 2>&1; then
         echo "⚙️  Disabling extension $ext..."
         gnome-extensions disable "$ext" 2>/dev/null || true
