@@ -1,6 +1,6 @@
 [package]
 name = "gnomescroll"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 authors = ["Kalpit"]
 description = "High-performance scrolling screenshot utility for GNOME Wayland"
