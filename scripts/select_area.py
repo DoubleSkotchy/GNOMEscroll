@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import cairo
 import gi
 
 gi.require_version('Gtk', '4.0')
@@ -70,7 +71,7 @@ class AreaSelector(Gtk.ApplicationWindow):
         if self.start_x is not None and self.curr_x is not None:
             w = abs(self.curr_x - self.start_x)
             h = abs(self.curr_y - self.start_y)
-            if w >= 25 and h >= 25:
+            if w >= 20 and h >= 20:
                 x1 = min(self.start_x, self.curr_x)
                 y1 = min(self.start_y, self.curr_y)
                 print(f"{int(x1)},{int(y1)},{int(w)},{int(h)}")
@@ -90,7 +91,7 @@ class AreaSelector(Gtk.ApplicationWindow):
             if self.start_x is not None and self.curr_x is not None:
                 w = abs(self.curr_x - self.start_x)
                 h = abs(self.curr_y - self.start_y)
-                if w >= 25 and h >= 25:
+                if w >= 20 and h >= 20:
                     x1 = min(self.start_x, self.curr_x)
                     y1 = min(self.start_y, self.curr_y)
                     print(f"{int(x1)},{int(y1)},{int(w)},{int(h)}")
@@ -99,10 +100,14 @@ class AreaSelector(Gtk.ApplicationWindow):
         return False
 
     def on_draw(self, drawing_area, cr, screen_w, screen_h):
-        # 1. Dark overlay
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.38)
-        cr.rectangle(0, 0, screen_w, screen_h)
-        cr.fill()
+        # 1. ALWAYS clear the entire cairo buffer to transparent (0,0,0,0) first
+        # This completely wipes previous frames and eliminates any stretching/smearing glitches!
+        cr.save()
+        cr.set_operator(cairo.Operator.CLEAR)
+        cr.paint()
+        cr.restore()
+
+        cr.set_operator(cairo.Operator.OVER)
 
         # 2. If selection rectangle exists
         if self.start_x is not None and self.curr_x is not None:
@@ -111,62 +116,74 @@ class AreaSelector(Gtk.ApplicationWindow):
             w = abs(self.curr_x - self.start_x)
             h = abs(self.curr_y - self.start_y)
 
-            # Cutout selection area cleanly
-            cr.set_operator(0) # CAIRO_OPERATOR_CLEAR
+            # Draw dark overlay using EVEN_ODD fill rule:
+            # Outer screen rect MINUS inner selection rect = darkened background outside selection!
+            # The inside of the selection rect remains 100% untouched and crystal clear.
+            cr.set_fill_rule(cairo.FillRule.EVEN_ODD)
+            cr.rectangle(0, 0, screen_w, screen_h)
             cr.rectangle(x, y, w, h)
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.38)
             cr.fill()
+            cr.set_fill_rule(cairo.FillRule.WINDING)
 
-            cr.set_operator(2) # CAIRO_OPERATOR_OVER
+            if w >= 2 and h >= 2:
+                # Selection stroke border
+                cr.set_source_rgba(0.21, 0.52, 0.89, 0.95) # Adwaita accent blue #3584e4
+                cr.set_line_width(2.0)
+                cr.rectangle(x, y, w, h)
+                cr.stroke()
 
-            # Selection stroke border
-            cr.set_source_rgba(0.21, 0.52, 0.89, 0.95) # Adwaita accent blue #3584e4
-            cr.set_line_width(2.0)
-            cr.rectangle(x, y, w, h)
-            cr.stroke()
+            # Draw corner handles (only when box is big enough to prevent handle distortion)
+            if w >= 20 and h >= 20:
+                handle_len = min(14.0, w / 3.0, h / 3.0)
+                cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+                cr.set_line_width(3.0)
 
-            # Draw corner handles (like native GNOME screenshot tool)
-            handle_len = 14.0
-            handle_thick = 3.5
-            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
-            cr.set_line_width(handle_thick)
-
-            # Top-left
-            cr.move_to(x - 1, y + handle_len); cr.line_to(x - 1, y - 1); cr.line_to(x + handle_len, y - 1); cr.stroke()
-            # Top-right
-            cr.move_to(x + w - handle_len, y - 1); cr.line_to(x + w + 1, y - 1); cr.line_to(x + w + 1, y + handle_len); cr.stroke()
-            # Bottom-left
-            cr.move_to(x - 1, y + h - handle_len); cr.line_to(x - 1, y + h + 1); cr.line_to(x + handle_len, y + h + 1); cr.stroke()
-            # Bottom-right
-            cr.move_to(x + w - handle_len, y + h + 1); cr.line_to(x + w + 1, y + h + 1); cr.line_to(x + w + 1, y + h - handle_len); cr.stroke()
+                # Top-left
+                cr.move_to(x, y + handle_len); cr.line_to(x, y); cr.line_to(x + handle_len, y); cr.stroke()
+                # Top-right
+                cr.move_to(x + w - handle_len, y); cr.line_to(x + w, y); cr.line_to(x + w, y + handle_len); cr.stroke()
+                # Bottom-left
+                cr.move_to(x, y + h - handle_len); cr.line_to(x, y + h); cr.line_to(x + handle_len, y + h); cr.stroke()
+                # Bottom-right
+                cr.move_to(x + w - handle_len, y + h); cr.line_to(x + w, y + h); cr.line_to(x + w, y + h - handle_len); cr.stroke()
 
             # Measurement pill badge
-            badge_text = f"{int(w)} × {int(h)} px"
-            cr.set_font_size(13.0)
-            extents = cr.text_extents(badge_text)
-            bw = extents.width + 20.0
-            bh = 26.0
+            if w >= 30 and h >= 30:
+                badge_text = f"{int(w)} × {int(h)} px"
+                cr.set_font_size(13.0)
+                extents = cr.text_extents(badge_text)
+                bw = extents.width + 20.0
+                bh = 26.0
 
-            # Position badge at bottom center of rect
-            bx = x + (w - bw) / 2.0
-            by = y + h + 10.0
-            if by + bh > screen_h:
-                by = y - bh - 10.0
+                # Position badge at bottom center of rect
+                bx = x + (w - bw) / 2.0
+                by = y + h + 10.0
+                if by + bh > screen_h - 10:
+                    by = y - bh - 10.0
+                bx = max(10.0, min(screen_w - bw - 10.0, bx))
+                by = max(10.0, min(screen_h - bh - 10.0, by))
 
-            # Badge background
-            cr.set_source_rgba(0.12, 0.12, 0.12, 0.92)
-            cr.new_sub_path()
-            radius = bh / 2.0
-            cr.arc(bx + radius, by + radius, radius, 1.5707, 3.1415)
-            cr.arc(bx + radius, by + bh - radius, radius, 3.1415, 4.7123)
-            cr.arc(bx + bw - radius, by + bh - radius, radius, 4.7123, 6.2831)
-            cr.arc(bx + bw - radius, by + radius, radius, 0.0, 1.5707)
-            cr.close_path()
+                # Badge background
+                cr.set_source_rgba(0.12, 0.12, 0.12, 0.92)
+                cr.new_sub_path()
+                radius = bh / 2.0
+                cr.arc(bx + radius, by + radius, radius, 1.5707, 3.1415)
+                cr.arc(bx + radius, by + bh - radius, radius, 3.1415, 4.7123)
+                cr.arc(bx + bw - radius, by + bh - radius, radius, 4.7123, 6.2831)
+                cr.arc(bx + bw - radius, by + radius, radius, 0.0, 1.5707)
+                cr.close_path()
+                cr.fill()
+
+                # Badge text
+                cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
+                cr.move_to(bx + 10.0, by + 18.0)
+                cr.show_text(badge_text)
+        else:
+            # No selection yet: draw uniform dark overlay
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.38)
+            cr.rectangle(0, 0, screen_w, screen_h)
             cr.fill()
-
-            # Badge text
-            cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
-            cr.move_to(bx + 10.0, by + 18.0)
-            cr.show_text(badge_text)
 
         # 3. Top instruction pill
         banner_text = "📸 Drag to select capture region  •  Press Esc to cancel"

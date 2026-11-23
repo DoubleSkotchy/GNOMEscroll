@@ -14,7 +14,6 @@ impl FrameStitcher {
     pub fn new(width: u32, height: u32) -> Self {
         let w = width as usize;
         let h = height as usize;
-        // Search up to 85% of viewport height per step to accommodate large mouse wheel jumps
         let max_delta = (h as f64 * 0.85) as usize;
 
         Self {
