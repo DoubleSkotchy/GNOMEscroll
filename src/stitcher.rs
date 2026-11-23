@@ -51,14 +51,17 @@ impl FrameStitcher {
             return false;
         }
 
-        // 2. High-precision 2D Template Matching
-        // Avoid sticky top headers (top 30%) and sticky bottom footers (bottom 25%)
-        // Template spans [y0 - template_h .. y0] in the lower-middle content area
+        // 2. Dynamic Feature-Rich Template Selection
+        // Instead of hardcoding a region (which might be blank white margin in PDFs),
+        // we dynamically find the vertical window in `prev` that has maximum text/contrast!
         let template_h = (self.height as f64 * 0.35) as usize;
-        let y0 = (self.height as f64 * 0.70) as usize;
-        let max_d = self.max_delta.min(y0 - template_h);
+        let max_d = self.max_delta.min(self.height / 3);
 
-        if max_d == 0 {
+        let (y0, contrast) = self.find_high_contrast_window(prev, template_h, max_d);
+
+        // If the window has virtually zero contrast (pure white/blank page), skip until content appears
+        if contrast < 12.0 {
+            self.prev_frame = Some(frame.to_vec());
             return false;
         }
 
@@ -91,6 +94,48 @@ impl FrameStitcher {
         // If sudden jump or match not found, update prev_frame so subsequent frames don't drift
         self.prev_frame = Some(frame.to_vec());
         false
+    }
+
+    /// Find the vertical slice [y0 - template_h .. y0] in `prev` that has maximum visual contrast/variance
+    fn find_high_contrast_window(&self, prev: &[u8], template_h: usize, max_d: usize) -> (usize, f64) {
+        let w = self.width;
+        let h = self.height;
+        let search_start = template_h + max_d;
+        let search_end = h.saturating_sub(10);
+
+        if search_start >= search_end {
+            return (h.min(template_h + max_d), 0.0);
+        }
+
+        let mut best_y = search_start;
+        let mut max_var = -1.0;
+
+        for y in (search_start..search_end).step_by(12) {
+            let mut sum = 0u64;
+            let mut sum_sq = 0u64;
+            let mut count = 0u64;
+
+            for r in (y - template_h..y).step_by(6) {
+                let row_off = r * w * 4;
+                for c in (0..w).step_by(12) {
+                    let val = prev[row_off + c * 4] as u64;
+                    sum += val;
+                    sum_sq += val * val;
+                    count += 1;
+                }
+            }
+
+            if count > 0 {
+                let mean = sum as f64 / count as f64;
+                let var = (sum_sq as f64 / count as f64) - (mean * mean);
+                if var > max_var {
+                    max_var = var;
+                    best_y = y;
+                }
+            }
+        }
+
+        (best_y, max_var)
     }
 
     /// Fast check if consecutive frames are essentially identical (cursor blink, idle)
@@ -142,7 +187,7 @@ impl FrameStitcher {
                 let ci = c_row_off + c * 4;
 
                 let dr = (prev[pi] as i32 - curr[ci] as i32).abs() as u64;
-                let dg = (prev[pi + 1] as i32 - curr[ci + 1] as i32).abs() as u64;
+                let dg = (prev[pi + 1] as i32 - curr[pi + 1] as i32).abs() as u64;
                 let db = (prev[pi + 2] as i32 - curr[ci + 2] as i32).abs() as u64;
                 total_diff += dr + dg + db;
                 samples += 3;
