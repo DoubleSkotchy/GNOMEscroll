@@ -1,20 +1,26 @@
 #!/usr/bin/env python3
-"""GNOMEscroll Area Selector — GTK4 fullscreen overlay with zero visual artifacts."""
+"""GNOMEscroll Area Selector — 100% transparent fullscreen overlay using GTK3 RGBA visual."""
 import sys
 import math
 import cairo
 import gi
 
-gi.require_version('Gtk', '4.0')
+gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, Gdk, GLib
 
 
-class AreaSelector(Gtk.ApplicationWindow):
-    def __init__(self, app):
-        super().__init__(application=app)
+class AreaSelector(Gtk.Window):
+    def __init__(self):
+        super().__init__(type=Gtk.WindowType.TOPLEVEL)
         self.set_title('GNOMEscroll Area Selector')
         self.set_decorated(False)
-        self.fullscreen()
+
+        # Enable true RGBA transparency on Wayland & X11
+        screen = Gdk.Screen.get_default()
+        visual = screen.get_rgba_visual() if screen else None
+        if visual:
+            self.set_visual(visual)
+        self.set_app_paintable(True)
 
         self.start_x = None
         self.start_y = None
@@ -22,53 +28,49 @@ class AreaSelector(Gtk.ApplicationWindow):
         self.curr_y = None
         self.confirmed = False
 
-        self.set_cursor_from_name('crosshair')
-
-        # Transparent window CSS
-        css_provider = Gtk.CssProvider()
-        css = """
-        window, .background {
-            background-color: transparent;
-            background: transparent;
-        }
-        """
-        css_provider.load_from_data(css.encode('utf-8'))
-        Gtk.StyleContext.add_provider_for_display(
-            Gdk.Display.get_default(),
-            css_provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        self.add_events(
+            Gdk.EventMask.BUTTON_PRESS_MASK
+            | Gdk.EventMask.BUTTON_RELEASE_MASK
+            | Gdk.EventMask.POINTER_MOTION_MASK
+            | Gdk.EventMask.KEY_PRESS_MASK
         )
 
-        # Drawing area
-        self.drawing_area = Gtk.DrawingArea()
-        self.drawing_area.set_draw_func(self.on_draw)
-        self.drawing_area.set_cursor_from_name('crosshair')
-        self.set_child(self.drawing_area)
+        self.connect('draw', self.on_draw)
+        self.connect('button-press-event', self.on_button_press)
+        self.connect('motion-notify-event', self.on_motion_notify)
+        self.connect('button-release-event', self.on_button_release)
+        self.connect('key-press-event', self.on_key_press)
+        self.connect('realize', self.on_realize)
 
-        # Drag gesture
-        self.drag = Gtk.GestureDrag()
-        self.drag.connect('drag-begin', self.on_drag_begin)
-        self.drag.connect('drag-update', self.on_drag_update)
-        self.drag.connect('drag-end', self.on_drag_end)
-        self.drawing_area.add_controller(self.drag)
+        self.fullscreen()
 
-        # Key controller
-        key_controller = Gtk.EventControllerKey()
-        key_controller.connect('key-pressed', self.on_key_pressed)
-        self.add_controller(key_controller)
+    def on_realize(self, widget):
+        window = self.get_window()
+        if window:
+            display = Gdk.Display.get_default()
+            cursor = Gdk.Cursor.new_from_name(display, 'crosshair')
+            window.set_cursor(cursor)
 
-    def on_drag_begin(self, gesture, start_x, start_y):
-        self.start_x = start_x
-        self.start_y = start_y
-        self.curr_x = start_x
-        self.curr_y = start_y
-        self.drawing_area.queue_draw()
+    def on_button_press(self, widget, event):
+        if event.button == 1:
+            self.start_x = event.x
+            self.start_y = event.y
+            self.curr_x = event.x
+            self.curr_y = event.y
+            self.queue_draw()
+        return True
 
-    def on_drag_update(self, gesture, offset_x, offset_y):
+    def on_motion_notify(self, widget, event):
         if self.start_x is not None:
-            self.curr_x = self.start_x + offset_x
-            self.curr_y = self.start_y + offset_y
-            self.drawing_area.queue_draw()
+            self.curr_x = event.x
+            self.curr_y = event.y
+            self.queue_draw()
+        return True
+
+    def on_button_release(self, widget, event):
+        if event.button == 1:
+            self.confirm_and_exit()
+        return True
 
     def confirm_and_exit(self):
         if self.start_x is not None and self.curr_x is not None:
@@ -77,37 +79,32 @@ class AreaSelector(Gtk.ApplicationWindow):
             if w >= 20 and h >= 20:
                 x1 = min(self.start_x, self.curr_x)
                 y1 = min(self.start_y, self.curr_y)
-                # Immediately hide window from compositor before printing coords
-                self.set_visible(False)
-                display = Gdk.Display.get_default()
-                if display:
-                    display.flush()
-                while GLib.MainContext.default().iteration(False):
-                    pass
+                # Hide window immediately before printing
+                self.hide()
+                while Gtk.events_pending():
+                    Gtk.main_iteration()
                 print(f"{int(x1)},{int(y1)},{int(w)},{int(h)}")
                 sys.stdout.flush()
                 self.confirmed = True
-                self.get_application().quit()
-            else:
-                self.start_x = None
-                self.start_y = None
-                self.curr_x = None
-                self.curr_y = None
-                self.drawing_area.queue_draw()
+                Gtk.main_quit()
+                return
+        self.start_x = None
+        self.start_y = None
+        self.curr_x = None
+        self.curr_y = None
+        self.queue_draw()
 
-    def on_drag_end(self, gesture, offset_x, offset_y):
-        self.confirm_and_exit()
-
-    def on_key_pressed(self, controller, keyval, keycode, state):
-        if keyval == Gdk.KEY_Escape:
+    def on_key_press(self, widget, event):
+        if event.keyval == Gdk.KEY_Escape:
+            self.hide()
+            Gtk.main_quit()
             sys.exit(1)
-        elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
+        elif event.keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
             self.confirm_and_exit()
-        return False
+        return True
 
     @staticmethod
     def _draw_rounded_rect(cr, x, y, w, h, r):
-        """Draw a rounded rectangle as a single self-contained sub-path."""
         cr.new_sub_path()
         cr.arc(x + w - r, y + r, r, -math.pi / 2, 0)
         cr.arc(x + w - r, y + h - r, r, 0, math.pi / 2)
@@ -115,43 +112,46 @@ class AreaSelector(Gtk.ApplicationWindow):
         cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
         cr.close_path()
 
-    def on_draw(self, drawing_area, cr, screen_w, screen_h):
-        # ── 1. Dark overlay ──────────────────────────────────────────
-        # Always start from a completely blank path state
-        cr.save()
-        cr.new_path()
+    def on_draw(self, widget, cr):
+        alloc = widget.get_allocation()
+        screen_w = alloc.width
+        screen_h = alloc.height
 
+        # 1. Clear background completely to 100% transparent (desktop visible!)
+        cr.save()
+        cr.set_operator(cairo.OPERATOR_SOURCE)
+        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0)
+        cr.paint()
+        cr.restore()
+
+        # 2. Draw 35% dim overlay outside selection
         if self.start_x is not None and self.curr_x is not None:
             x = min(self.start_x, self.curr_x)
             y = min(self.start_y, self.curr_y)
             w = abs(self.curr_x - self.start_x)
             h = abs(self.curr_y - self.start_y)
 
-            # 4 non-overlapping rectangles around selection — each is a separate fill
+            cr.save()
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.35)
 
             # Top band
             if y > 0:
-                cr.new_path()
                 cr.rectangle(0, 0, screen_w, y)
                 cr.fill()
             # Bottom band
             if y + h < screen_h:
-                cr.new_path()
                 cr.rectangle(0, y + h, screen_w, screen_h - (y + h))
                 cr.fill()
             # Left band
             if x > 0:
-                cr.new_path()
                 cr.rectangle(0, y, x, h)
                 cr.fill()
             # Right band
             if x + w < screen_w:
-                cr.new_path()
                 cr.rectangle(x + w, y, screen_w - (x + w), h)
                 cr.fill()
 
-            # ── 2. Blue selection border ─────────────────────────────
+            # Blue selection border
             if w >= 2 and h >= 2:
                 cr.new_path()
                 cr.set_source_rgba(0.21, 0.52, 0.89, 0.95)
@@ -159,7 +159,7 @@ class AreaSelector(Gtk.ApplicationWindow):
                 cr.rectangle(x, y, w, h)
                 cr.stroke()
 
-            # ── 3. White corner handles ──────────────────────────────
+            # White corner handles
             if w >= 24 and h >= 24:
                 handle_len = min(14.0, w / 3.0, h / 3.0)
                 cr.new_path()
@@ -168,18 +168,17 @@ class AreaSelector(Gtk.ApplicationWindow):
                 cr.set_line_cap(cairo.LINE_CAP_ROUND)
 
                 for (cx, cy, dx1, dy1, dx2, dy2) in [
-                    (x, y, handle_len, 0, 0, handle_len),              # top-left
-                    (x + w, y, -handle_len, 0, 0, handle_len),         # top-right
-                    (x, y + h, handle_len, 0, 0, -handle_len),         # bottom-left
-                    (x + w, y + h, -handle_len, 0, 0, -handle_len),    # bottom-right
+                    (x, y, handle_len, 0, 0, handle_len),
+                    (x + w, y, -handle_len, 0, 0, handle_len),
+                    (x, y + h, handle_len, 0, 0, -handle_len),
+                    (x + w, y + h, -handle_len, 0, 0, -handle_len),
                 ]:
                     cr.move_to(cx + dx1, cy + dy1)
                     cr.line_to(cx, cy)
                     cr.line_to(cx + dx2, cy + dy2)
-
                 cr.stroke()
 
-            # ── 4. Dimension badge ───────────────────────────────────
+            # Measurement pill badge
             if w >= 30 and h >= 30:
                 badge_text = f"{int(w)} × {int(h)} px"
                 cr.set_font_size(13.0)
@@ -204,20 +203,17 @@ class AreaSelector(Gtk.ApplicationWindow):
                 cr.set_source_rgba(1.0, 1.0, 1.0, 1.0)
                 cr.move_to(bx + 10.0, by + 18.0)
                 cr.show_text(badge_text)
-                cr.new_path()
+
+            cr.restore()
         else:
-            # No selection yet — uniform dark overlay
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.35)
+            # No selection yet: subtle 20% tint so user knows tool is active
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.20)
             cr.rectangle(0, 0, screen_w, screen_h)
             cr.fill()
 
-        cr.restore()
-
-        # ── 5. Top instruction banner (always drawn, isolated context) ──
+        # Top instruction banner
         cr.save()
-        cr.new_path()
-
-        banner_text = "Drag to select capture region  —  Esc to cancel"
+        banner_text = "Drag to select capture area  —  Esc to cancel"
         cr.set_font_size(13.0)
         extents = cr.text_extents(banner_text)
         bw = extents.width + 32.0
@@ -226,35 +222,31 @@ class AreaSelector(Gtk.ApplicationWindow):
         by = 28.0
         radius = bh / 2.0
 
-        # Banner background
+        cr.new_path()
         cr.set_source_rgba(0.12, 0.12, 0.12, 0.88)
         self._draw_rounded_rect(cr, bx, by, bw, bh, radius)
         cr.fill()
 
-        # Banner border
         cr.new_path()
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.15)
         cr.set_line_width(1.0)
         self._draw_rounded_rect(cr, bx, by, bw, bh, radius)
         cr.stroke()
 
-        # Banner text
         cr.new_path()
         cr.set_source_rgba(1.0, 1.0, 1.0, 0.95)
         cr.move_to(bx + 16.0, by + 21.0)
         cr.show_text(banner_text)
-        cr.new_path()
-
         cr.restore()
+
+        return False
 
 
 def main():
-    app = Gtk.Application(application_id='com.gnomescroll.selector')
-    def on_activate(app):
-        win = AreaSelector(app)
-        win.present()
-    app.connect('activate', on_activate)
-    app.run(None)
+    win = AreaSelector()
+    win.show_all()
+    Gtk.main()
+
 
 if __name__ == '__main__':
     main()
