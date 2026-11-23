@@ -91,14 +91,14 @@ gnomescroll --no-clipboard
 
 ## ⚙️ Architecture & Stitching Algorithm
 
-GNOMEscroll uses a two-stage coarse-to-fine displacement estimator:
-1. **1D Horizontal Luminance Projection:**
+GNOMEscroll uses a high-performance multi-stage displacement correlation pipeline:
+1. **3-Strip Vertical 1D Luminance Profiles:**
    $$L_t(y) = \frac{1}{|X|} \sum_{x \in X} (0.299 R + 0.587 G + 0.114 B)$$
-   Compares the 1D luminance profile of frame $t$ with frame $t-1$ over shifts $\Delta y \in [3, \text{max\_stride}]$. This reduces 2D searching to microsecond 1D vector operations.
-2. **2D Verification Grid:**
-   The top candidate shifts are verified against a subsampled 2D pixel grid.
-3. **Rolling Canvas Appender:**
-   Only the uniquely revealed bottom $\Delta y$ rows are copied into the canvas, ensuring zero frame tearing and keeping memory consumption constant regardless of scroll speed.
+   Compares 1D vertical luminance profiles across Left, Center, and Right strips between frame $t$ and frame $t-1$ over shifts $\Delta y \in [2, \Delta y_{\max}]$ in both scroll directions (Down and Up). This reduces candidate searching to microsecond vector operations.
+2. **2D Full-Overlap SAD Verification:**
+   The top candidate shifts are verified with exact 2D pixel SAD and high-contrast ink verification gates, preventing discontinuous page jumps and text superimposition.
+3. **Bidirectional Rolling Canvas:**
+   Newly revealed rows are seamlessly appended to the bottom (when scrolling down) or prepended to the top (when scrolling up), ensuring smooth progressive stitching with zero tearing.
 
 ---
 
