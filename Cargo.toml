@@ -2,7 +2,7 @@
 name = "gnomescroll"
 version = "1.0.0"
 edition = "2021"
-authors = ["Kalpit"]
+authors = ["DoubleSkotchy <218381913+DoubleSkotchy@users.noreply.github.com>"]
 description = "High-performance scrolling screenshot utility for GNOME Wayland"
 license = "MIT"
 

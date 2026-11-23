@@ -1,7 +1,7 @@
 {
   "name": "GNOMEscroll",
   "description": "Scrolling screenshot button integration inside native GNOME Screenshot UI",
-  "uuid": "gnomescroll@kalpit.github.com",
+  "uuid": "gnomescroll@doubleskotchy.github.com",
   "shell-version": [
     "45",
     "46",
@@ -11,7 +11,7 @@
     "50",
     "51"
   ],
-  "url": "https://github.com/kalpit/GNOMEscroll",
+  "url": "https://github.com/DoubleSkotchy/GNOMEscroll",
   "version": 1
 }
 

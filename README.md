@@ -46,7 +46,7 @@
 Clone the repository and run the automated installer:
 
 ```bash
-git clone https://github.com/kalpit/GNOMEscroll.git
+git clone https://github.com/DoubleSkotchy/GNOMEscroll.git
 cd GNOMEscroll
 ./install.sh
 ```

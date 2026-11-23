@@ -11,8 +11,8 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(
     name = "gnomescroll",
-    author = "Kalpit",
-    version = "0.1.0",
+    author = "Double Skotchy",
+    version = "1.0.0",
     about = "High-performance scrolling screenshot utility for GNOME Wayland"
 )]
 struct Args {
@@ -70,7 +70,7 @@ fn find_script(name: &str) -> Option<PathBuf> {
         }
     }
 
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home/kalpit"));
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let user_share = home.join(format!(".local/share/gnomescroll/{}", name));
     if user_share.exists() {
         return Some(user_share);

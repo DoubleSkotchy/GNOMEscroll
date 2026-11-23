@@ -8,7 +8,7 @@ echo "======================================================"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BIN_DIR="$HOME/.local/bin"
 SHARE_DIR="$HOME/.local/share/gnomescroll"
-EXT_DIR="$HOME/.local/share/gnome-shell/extensions/gnomescroll@kalpit.github.com"
+EXT_DIR="$HOME/.local/share/gnome-shell/extensions/gnomescroll@doubleskotchy.github.com"
 
 # 1. Build release binary if not built yet
 echo "📦 Building optimized release binary..."
@@ -34,7 +34,7 @@ cp -rf "$SCRIPT_DIR/extension/"* "$EXT_DIR/"
 # 5. Enable extension
 if which gnome-extensions >/dev/null 2>&1; then
     echo "⚙️  Enabling extension in GNOME..."
-    gnome-extensions enable "gnomescroll@kalpit.github.com" 2>/dev/null || true
+    gnome-extensions enable "gnomescroll@doubleskotchy.github.com" 2>/dev/null || true
 fi
 
 # 6. Ensure PATH in ~/.bashrc
