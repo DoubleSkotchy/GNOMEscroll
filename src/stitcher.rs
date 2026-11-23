@@ -1,3 +1,9 @@
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ScrollDirection {
+    Down,
+    Up,
+}
+
 pub struct FrameStitcher {
     width: usize,
     height: usize,
@@ -27,7 +33,10 @@ impl FrameStitcher {
         }
     }
 
-    /// Process a new incoming RGBA frame from screencast
+    /// Process a new incoming RGBA frame from screencast.
+    /// Supports bidirectional scrolling:
+    /// - Scrolled DOWN: concats newly revealed rows downwards.
+    /// - Scrolled UP: concats newly revealed rows upwards.
     pub fn feed_frame(&mut self, frame: &[u8]) -> bool {
         let expected_size = self.width * self.height * 4;
         if frame.len() != expected_size {
@@ -64,71 +73,93 @@ impl FrameStitcher {
         }
 
         // ══════════════════════════════════════════════════════════════
-        // STAGE 1: 1D Profile Scan for delta \in [0, max_d] (~0.03ms)
+        // STAGE 1: Bidirectional 1D Profile Scan for delta \in [0, max_d]
         // ══════════════════════════════════════════════════════════════
-        let mut profile_errors: Vec<(usize, f32)> = Vec::with_capacity(max_d + 1);
+        // Evaluate both Scroll Down and Scroll Up candidates in 1D (~0.04ms)
+        let mut candidates: Vec<(usize, ScrollDirection, f32)> = Vec::with_capacity(max_d * 2 + 1);
 
-        for delta in 0..=max_d {
+        // Delta = 0 (stationary)
+        let mut sum_diff_0 = 0.0f32;
+        for r in 0..self.height {
+            sum_diff_0 += (a_prof_l[r] - c_prof_l[r]).abs()
+                + (a_prof_c[r] - c_prof_c[r]).abs()
+                + (a_prof_r[r] - c_prof_r[r]).abs();
+        }
+        let err_0 = sum_diff_0 / self.height as f32;
+        candidates.push((0, ScrollDirection::Down, err_0));
+
+        // Scan delta in 2..=max_d in both directions
+        for delta in 2..=max_d {
             let overlap = self.height - delta;
-            let mut sum_diff = 0.0f32;
+            let mut sum_down = 0.0f32;
+            let mut sum_up = 0.0f32;
 
-            // Full row evaluation (row_step = 1) for exact parity-free matching
             for r in 0..overlap {
-                let a_r = delta + r;
-                let f_r = r;
+                // Down: anchor scrolled down, content moved UP: anchor[delta + r] == curr[r]
+                let dl_d = (a_prof_l[delta + r] - c_prof_l[r]).abs();
+                let dc_d = (a_prof_c[delta + r] - c_prof_c[r]).abs();
+                let dr_d = (a_prof_r[delta + r] - c_prof_r[r]).abs();
+                sum_down += dl_d + dc_d + dr_d;
 
-                let dl = (a_prof_l[a_r] - c_prof_l[f_r]).abs();
-                let dc = (a_prof_c[a_r] - c_prof_c[f_r]).abs();
-                let dr = (a_prof_r[a_r] - c_prof_r[f_r]).abs();
-
-                sum_diff += dl + dc + dr;
+                // Up: anchor scrolled up, content moved DOWN: anchor[r] == curr[delta + r]
+                let dl_u = (a_prof_l[r] - c_prof_l[delta + r]).abs();
+                let dc_u = (a_prof_c[r] - c_prof_c[delta + r]).abs();
+                let dr_u = (a_prof_r[r] - c_prof_r[delta + r]).abs();
+                sum_up += dl_u + dc_u + dr_u;
             }
 
-            let avg_err = if overlap > 0 { sum_diff / overlap as f32 } else { 255.0 };
-            profile_errors.push((delta, avg_err));
+            let avg_down = sum_down / overlap as f32;
+            let avg_up = sum_up / overlap as f32;
+
+            candidates.push((delta, ScrollDirection::Down, avg_down));
+            candidates.push((delta, ScrollDirection::Up, avg_up));
         }
 
-        let mut sorted_candidates = profile_errors;
-        sorted_candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.sort_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
 
         // ══════════════════════════════════════════════════════════════
         // STAGE 2: 2D Full-Overlap SAD on Top Candidates (~0.25ms)
         // ══════════════════════════════════════════════════════════════
-        let top_k = 10.min(sorted_candidates.len());
-        let mut tested_deltas = std::collections::HashSet::new();
-        let mut candidates_to_test = Vec::new();
+        let top_k = 12.min(candidates.len());
+        let mut tested = std::collections::HashSet::new();
+        let mut to_test = Vec::new();
 
-        // Always include delta=0 in candidate set to verify stationary condition
-        candidates_to_test.push(0);
-        tested_deltas.insert(0);
+        // Always test delta=0
+        to_test.push((0, ScrollDirection::Down));
+        tested.insert((0, ScrollDirection::Down));
 
-        for &(d, _) in &sorted_candidates[..top_k] {
+        for &(d, dir, _) in &candidates[..top_k] {
+            if d == 0 {
+                continue;
+            }
             for neighbor in [d.saturating_sub(1), d, (d + 1).min(max_d)] {
-                if tested_deltas.insert(neighbor) {
-                    candidates_to_test.push(neighbor);
+                if neighbor >= 2 && tested.insert((neighbor, dir)) {
+                    to_test.push((neighbor, dir));
                 }
             }
         }
 
         let mut best_delta = 0usize;
+        let mut best_dir = ScrollDirection::Down;
         let mut best_sad = f64::MAX;
         let mut best_ink_sad = f64::MAX;
         let mut best_ink_count = 0usize;
 
-        // row_step = 1 ensures pixel-perfect integer alignment without parity bias!
-        for &d in &candidates_to_test {
+        // row_step = 1 ensures exact pixel alignment without parity bias
+        for &(d, dir) in &to_test {
             let (sad, ink_sad, ink_count) =
-                self.compute_overlap_metrics(anchor, frame, d, left_m, right_m, 1, 4);
+                self.compute_overlap_metrics(anchor, frame, d, dir, left_m, right_m, 1, 4);
 
             if sad < best_sad {
                 best_sad = sad;
                 best_ink_sad = ink_sad;
                 best_ink_count = ink_count;
                 best_delta = d;
+                best_dir = dir;
             }
         }
 
-        // If delta=0 won or delta is too small, the viewport is stationary
+        // If delta=0 won or delta is too small, viewport is stationary
         if best_delta < 2 {
             return false;
         }
@@ -137,30 +168,38 @@ impl FrameStitcher {
         // STAGE 3: Robust Validation Gates
         // ══════════════════════════════════════════════════════════════
         // Gate A: Global overlap difference threshold
-        // Genuinely matching frames have SAD < 4.0. Discontinuous jumps have SAD > 25.0.
         if best_sad > 6.0 {
             return false;
         }
 
         // Gate B: Text/Ink anti-superimposition gate
-        // Superimposed lines (like 8.2 on 8.3) produce ink SAD > 35.0. Genuine match is < 12.0.
         if best_ink_count >= 25 && best_ink_sad > 20.0 {
             return false;
         }
 
-        // Gate C: Minimum feature verification for low-contrast / sparse regions
+        // Gate C: Minimum feature verification
         if best_ink_count < 10 && best_sad > 1.2 {
             return false;
         }
 
         // ══════════════════════════════════════════════════════════════
-        // STAGE 4: Confirmed Match — Append Newly Revealed Rows
+        // STAGE 4: Confirmed Match — Concat in Scroll Direction
         // ══════════════════════════════════════════════════════════════
-        let start_row = self.height - best_delta;
-        let start_byte = start_row * self.width * 4;
-        let end_byte = self.height * self.width * 4;
+        match best_dir {
+            ScrollDirection::Down => {
+                // Scrolled down: newly revealed rows at bottom of curr [H - best_delta .. H]
+                let start_row = self.height - best_delta;
+                let start_byte = start_row * self.width * 4;
+                let end_byte = self.height * self.width * 4;
+                self.canvas.extend_from_slice(&frame[start_byte..end_byte]);
+            }
+            ScrollDirection::Up => {
+                // Scrolled up: newly revealed rows at top of curr [0 .. best_delta]
+                let end_byte = best_delta * self.width * 4;
+                self.canvas.splice(0..0, frame[..end_byte].iter().cloned());
+            }
+        }
 
-        self.canvas.extend_from_slice(&frame[start_byte..end_byte]);
         self.current_height += best_delta;
         self.anchor_frame = Some(frame.to_vec());
         self.anchor_profiles = Some(curr_profiles);
@@ -227,12 +266,13 @@ impl FrameStitcher {
         (prof_l, prof_c, prof_r)
     }
 
-    /// Compute 2D full-overlap SAD and ink-only SAD
+    /// Compute 2D overlap SAD and ink-only SAD for a given delta and direction
     fn compute_overlap_metrics(
         &self,
         anchor: &[u8],
         curr: &[u8],
         delta: usize,
+        direction: ScrollDirection,
         left_m: usize,
         right_m: usize,
         row_step: usize,
@@ -248,8 +288,13 @@ impl FrameStitcher {
         let mut ink_samples = 0usize;
 
         for r in (0..overlap_h).step_by(row_step) {
-            let a_off = (delta + r) * w * 4;
-            let c_off = r * w * 4;
+            let (a_row, c_row) = match direction {
+                ScrollDirection::Down => (delta + r, r),
+                ScrollDirection::Up => (r, delta + r),
+            };
+
+            let a_off = a_row * w * 4;
+            let c_off = c_row * w * 4;
 
             for c in (left_m..right_m).step_by(col_step) {
                 let ai = a_off + c * 4;

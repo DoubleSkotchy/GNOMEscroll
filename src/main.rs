@@ -118,7 +118,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         None => {
             match select_area_interactive() {
-                Some(geom) => geom,
+                Some(geom) => {
+                    // Allow Wayland compositor to redraw the clean screen after overlay unmaps
+                    std::thread::sleep(Duration::from_millis(250));
+                    geom
+                }
                 None => {
                     println!("🚫 Area selection cancelled.");
                     return Ok(());
@@ -131,8 +135,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("║             📜 GNOMEscroll: Scrolling Screenshot              ║");
     println!("╠════════════════════════════════════════════════════════════════╣");
     println!("║  📐 Area       : {:>4} × {:<4} px at ({:>4}, {:<4})                ║", width, height, x, y);
-    println!("║  👉 Action     : Scroll down freely using mouse wheel/trackpad ║");
-    println!("║  ⌨️  Finish     : Press [Enter] or click 'Finish' in the pill   ║");
+    println!("║  👉 Action     : Scroll up or down freely (mouse wheel/trackpad)║");
+    println!("║  ⌨️  Finish     : Press Super+Ctrl+S or [Enter] when done       ║");
     println!("║  ❌ Cancel     : Press [Esc] / Ctrl+C to abort                 ║");
     println!("╚════════════════════════════════════════════════════════════════╝");
 
@@ -146,7 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    // 2. Start controller (terminal listener + toggle FIFO + floating GTK pill)
+    // 2. Start controller (terminal listener + toggle FIFO)
     let controller = ui::Controller::start(x, y, width, height);
     let stop_flag = controller.stop_flag();
 
@@ -163,14 +167,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stitcher = stitcher::FrameStitcher::new(width, height);
     let mut frames_received = 0usize;
 
-    // Wait briefly for initial frame ingestion
-    for _ in 0..20 {
-        if let Ok(frame) = frame_rx.recv_timeout(Duration::from_millis(100)) {
+    // Discard any preroll frames so frame 1 is guaranteed 100% clean
+    std::thread::sleep(Duration::from_millis(150));
+    let mut initial_frame = None;
+    while let Ok(frame) = frame_rx.try_recv() {
+        frames_received += 1;
+        initial_frame = Some(frame);
+    }
+    if initial_frame.is_none() {
+        if let Ok(frame) = frame_rx.recv_timeout(Duration::from_millis(600)) {
             frames_received += 1;
-            if stitcher.feed_frame(&frame) {
-                break;
-            }
+            initial_frame = Some(frame);
         }
+    }
+    if let Some(frame) = initial_frame {
+        stitcher.feed_frame(&frame);
     }
 
     // Loop until user signals Finish or Cancel

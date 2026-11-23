@@ -70,14 +70,22 @@ class AreaSelector(Gtk.ApplicationWindow):
             self.curr_y = self.start_y + offset_y
             self.drawing_area.queue_draw()
 
-    def on_drag_end(self, gesture, offset_x, offset_y):
+    def confirm_and_exit(self):
         if self.start_x is not None and self.curr_x is not None:
             w = abs(self.curr_x - self.start_x)
             h = abs(self.curr_y - self.start_y)
             if w >= 20 and h >= 20:
                 x1 = min(self.start_x, self.curr_x)
                 y1 = min(self.start_y, self.curr_y)
+                # Immediately hide window from compositor before printing coords
+                self.set_visible(False)
+                display = Gdk.Display.get_default()
+                if display:
+                    display.flush()
+                while GLib.MainContext.default().iteration(False):
+                    pass
                 print(f"{int(x1)},{int(y1)},{int(w)},{int(h)}")
+                sys.stdout.flush()
                 self.confirmed = True
                 self.get_application().quit()
             else:
@@ -87,19 +95,14 @@ class AreaSelector(Gtk.ApplicationWindow):
                 self.curr_y = None
                 self.drawing_area.queue_draw()
 
+    def on_drag_end(self, gesture, offset_x, offset_y):
+        self.confirm_and_exit()
+
     def on_key_pressed(self, controller, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
             sys.exit(1)
         elif keyval in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_space):
-            if self.start_x is not None and self.curr_x is not None:
-                w = abs(self.curr_x - self.start_x)
-                h = abs(self.curr_y - self.start_y)
-                if w >= 20 and h >= 20:
-                    x1 = min(self.start_x, self.curr_x)
-                    y1 = min(self.start_y, self.curr_y)
-                    print(f"{int(x1)},{int(y1)},{int(w)},{int(h)}")
-                    self.confirmed = True
-                    self.get_application().quit()
+            self.confirm_and_exit()
         return False
 
     @staticmethod

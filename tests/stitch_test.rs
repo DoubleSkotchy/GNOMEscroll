@@ -224,3 +224,64 @@ fn test_smooth_scrolling_and_pauses() {
     assert_eq!(max_diff, 0, "Smooth trackpad scroll with pauses must be 100% pixel-perfect!");
     println!("✅ Verified: Smooth scrolling with pauses passed with 0 pixel difference!");
 }
+
+
+#[test]
+fn test_scroll_up_concatenation() {
+    let pdf_path = std::path::Path::new("/tmp/toc_page-007.png");
+    if !pdf_path.exists() {
+        return;
+    }
+
+    let img = match image::open(pdf_path) {
+        Ok(i) => i.to_rgba8(),
+        Err(_) => return,
+    };
+
+    let (width, height) = img.dimensions();
+    let view_h = 500usize;
+    if height < 1200 {
+        return;
+    }
+
+    let raw = img.into_raw();
+    let mut stitcher = FrameStitcher::new(width, view_h as u32);
+
+    // Initial frame at y=400, then user scrolls UPwards towards the top of the page:
+    let y_scrolls = [400, 320, 240, 150, 60];
+
+    for (step, &y) in y_scrolls.iter().enumerate() {
+        let start_byte = y * width as usize * 4;
+        let end_byte = (y + view_h) * width as usize * 4;
+        let frame = &raw[start_byte..end_byte];
+
+        let stitched = stitcher.feed_frame(frame);
+        if step == 0 {
+            assert!(stitched);
+        } else {
+            assert!(stitched, "Scroll UP step {} at y={} must be stitched upwards", step, y);
+        }
+    }
+
+    let (final_w, final_h, count, canvas) = stitcher.finish();
+    let expected_h = (400 - 60 + view_h) as u32;
+    assert_eq!(final_w, width);
+    assert_eq!(final_h, expected_h);
+    assert_eq!(count, y_scrolls.len());
+
+    // Ground truth: rows from y=60 to y=400 + view_h
+    let gt_start = 60 * width as usize * 4;
+    let gt_end = (400 + view_h) * width as usize * 4;
+    let gt = &raw[gt_start..gt_end];
+
+    assert_eq!(canvas.len(), gt.len());
+    let mut max_diff = 0i32;
+    for (&c, &g) in canvas.iter().zip(gt.iter()) {
+        let diff = (c as i32 - g as i32).abs();
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+    assert_eq!(max_diff, 0, "Upward scrolling stitched canvas must be 100% pixel-perfect!");
+    println!("✅ Verified: Upward scrolling concatenation passed with 0 pixel difference!");
+}

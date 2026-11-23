@@ -44,7 +44,7 @@ impl Controller {
         false
     }
 
-    pub fn start(x: i32, y: i32, width: u32, height: u32) -> Self {
+    pub fn start(_x: i32, _y: i32, _width: u32, _height: u32) -> Self {
         let (tx, rx) = channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
 
@@ -103,43 +103,21 @@ impl Controller {
             }
         });
 
-        // 4. Decide whether to spawn on-screen floating pill widget
-        // If capture area is large (> 1200x700 or near fullscreen), DO NOT spawn the pill
-        // so it never appears in the screenshot! User can simply press Super+Ctrl+S or Enter.
-        let is_near_fullscreen = width >= 1200 || height >= 700;
-        let mut pill_child = None;
-
-        if is_near_fullscreen {
-            // Send quick desktop notification so user knows capture is active
-            let _ = Command::new("notify-send")
-                .args([
-                    "-a", "GNOMEscroll",
-                    "-i", "camera-photo-symbolic",
-                    "-t", "3000",
-                    "Recording Started",
-                    "Scroll down, then press Super+Ctrl+S (or Enter) to finish."
-                ])
-                .spawn();
-        } else {
-            // Spawn floating pill outside capture area if script exists
-            if let Some(script_path) = find_pill_script() {
-                if let Ok(child) = Command::new(script_path)
-                    .arg(CONTROL_FIFO)
-                    .arg(x.to_string())
-                    .arg(y.to_string())
-                    .arg(width.to_string())
-                    .arg(height.to_string())
-                    .spawn()
-                {
-                    pill_child = Some(child);
-                }
-            }
-        }
+        // 4. Send non-intrusive desktop notification (never overlay a widget in the capture area)
+        let _ = Command::new("notify-send")
+            .args([
+                "-a", "GNOMEscroll",
+                "-i", "camera-photo-symbolic",
+                "-t", "3500",
+                "📸 GNOMEscroll Active",
+                "Scroll freely up or down. Press Super+Ctrl+S or [Enter] when finished."
+            ])
+            .spawn();
 
         Self {
             action_rx: rx,
             stop_flag,
-            pill_child,
+            pill_child: None,
         }
     }
 
@@ -150,34 +128,6 @@ impl Controller {
     pub fn stop_flag(&self) -> Arc<AtomicBool> {
         self.stop_flag.clone()
     }
-}
-
-fn find_pill_script() -> Option<PathBuf> {
-    let local = PathBuf::from("scripts/floating_pill.py");
-    if local.exists() {
-        return Some(local.canonicalize().unwrap_or(local));
-    }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join("scripts/floating_pill.py");
-            if candidate.exists() {
-                return Some(candidate);
-            }
-            let candidate2 = dir.join("../share/gnomescroll/scripts/floating_pill.py");
-            if candidate2.exists() {
-                return Some(candidate2);
-            }
-        }
-    }
-
-    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home/kalpit"));
-    let user_share = home.join(".local/share/gnomescroll/floating_pill.py");
-    if user_share.exists() {
-        return Some(user_share);
-    }
-
-    None
 }
 
 impl Drop for Controller {
