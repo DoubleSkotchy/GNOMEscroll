@@ -189,6 +189,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(action) = controller.poll_action() {
             match action {
                 ui::UserAction::Finish => {
+                    let _ = std::process::Command::new("canberra-gtk-play")
+                        .args(["-i", "screen-capture"])
+                        .spawn();
                     println!("\n🏁 Finishing capture and stitching...");
                     break;
                 }
