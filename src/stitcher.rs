@@ -19,7 +19,7 @@ impl FrameStitcher {
     pub fn new(width: u32, height: u32) -> Self {
         let w = width as usize;
         let h = height as usize;
-        let max_delta = (h as f64 * 0.85) as usize;
+        let max_delta = (h as f64 * 0.90) as usize;
 
         Self {
             width: w,
@@ -44,9 +44,9 @@ impl FrameStitcher {
         }
 
         // Margins to exclude scrollbar (right) and window borders (left)
-        let left_m = 16.min(self.width / 12);
-        let right_m = self.width.saturating_sub(40.min(self.width / 10));
-        if right_m <= left_m + 50 {
+        let left_m = 12.min(self.width / 16);
+        let right_m = self.width.saturating_sub(32.min(self.width / 12));
+        if right_m <= left_m + 30 {
             return false;
         }
 
@@ -168,17 +168,17 @@ impl FrameStitcher {
         // STAGE 3: Robust Validation Gates
         // ══════════════════════════════════════════════════════════════
         // Gate A: Global overlap difference threshold
-        if best_sad > 6.0 {
+        if best_sad > 8.0 {
             return false;
         }
 
         // Gate B: Text/Ink anti-superimposition gate
-        if best_ink_count >= 25 && best_ink_sad > 20.0 {
+        if best_ink_count >= 25 && best_ink_sad > 24.0 {
             return false;
         }
 
         // Gate C: Minimum feature verification
-        if best_ink_count < 10 && best_sad > 1.2 {
+        if best_ink_count < 10 && best_sad > 1.8 {
             return false;
         }
 

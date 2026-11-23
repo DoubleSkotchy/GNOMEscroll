@@ -58,27 +58,23 @@ pub fn export_screenshot(
     file.write_all(&png_bytes)?;
     file.flush()?;
 
-    // 5. Non-blocking asynchronous clipboard copy via wl-copy
+    // 5. Guaranteed full-image clipboard copy via wl-copy
     let mut copied = false;
     if copy_clipboard {
-        copied = true;
-        let bytes_to_copy = png_bytes;
-        std::thread::spawn(move || {
+        if let Ok(file_in) = File::open(&out_path) {
             if let Ok(mut child) = Command::new("wl-copy")
                 .arg("-t")
                 .arg("image/png")
-                .stdin(Stdio::piped())
+                .stdin(Stdio::from(file_in))
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
                 .spawn()
             {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(&bytes_to_copy);
-                    let _ = stdin.flush();
+                if let Ok(status) = child.wait() {
+                    copied = status.success();
                 }
-                let _ = child.wait();
             }
-        });
+        }
     }
 
     // 6. Play native screenshot shutter sound & send desktop notification
