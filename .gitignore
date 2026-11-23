@@ -4,3 +4,4 @@ Cargo.lock
 /tmp/gnomescroll*
 .DS_Store
 target/
+__pycache__/
