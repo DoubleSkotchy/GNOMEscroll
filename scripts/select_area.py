@@ -1,12 +1,82 @@
 #!/usr/bin/env python3
-"""GNOMEscroll Area Selector — 100% transparent fullscreen overlay using GTK3 RGBA visual."""
+"""GNOMEscroll Area Selector — 100% transparent screen overlay using Mutter desktop snapshot."""
+import os
 import sys
 import math
+import subprocess
 import cairo
 import gi
 
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, Gdk, GLib
+from gi.repository import Gtk, Gdk, GLib, Gio
+
+SNAPSHOT_PATH = "/tmp/gnomescroll_bg.png"
+
+
+def capture_desktop_snapshot():
+    """Capture a 1-frame snapshot of the live desktop via Mutter ScreenCast."""
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        proxy = Gio.DBusProxy.new_sync(
+            bus, Gio.DBusProxyFlags.NONE, None,
+            "org.gnome.Mutter.ScreenCast",
+            "/org/gnome/Mutter/ScreenCast",
+            "org.gnome.Mutter.ScreenCast",
+            None
+        )
+        session_path = proxy.call_sync("CreateSession", GLib.Variant("(a{sv})", ({},)), Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+        session_proxy = Gio.DBusProxy.new_sync(
+            bus, Gio.DBusProxyFlags.NONE, None,
+            "org.gnome.Mutter.ScreenCast",
+            session_path,
+            "org.gnome.Mutter.ScreenCast.Session",
+            None
+        )
+        # Determine monitor dimensions
+        screen = Gdk.Screen.get_default()
+        sw = screen.get_width() if screen else 1920
+        sh = screen.get_height() if screen else 1080
+
+        stream_path = session_proxy.call_sync("RecordArea", GLib.Variant("(iiiia{sv})", (0, 0, sw, sh, {})), Gio.DBusCallFlags.NONE, -1, None).unpack()[0]
+        stream_proxy = Gio.DBusProxy.new_sync(
+            bus, Gio.DBusProxyFlags.NONE, None,
+            "org.gnome.Mutter.ScreenCast",
+            stream_path,
+            "org.gnome.Mutter.ScreenCast.Stream",
+            None
+        )
+
+        node_id = None
+        def on_signal(proxy, sender_name, signal_name, parameters):
+            nonlocal node_id
+            if signal_name == "PipeWireStreamAdded":
+                node_id = parameters.unpack()[0]
+
+        stream_proxy.connect("g-signal", on_signal)
+        session_proxy.call_sync("Start", None, Gio.DBusCallFlags.NONE, -1, None)
+
+        loop = GLib.MainLoop()
+        def check_node():
+            if node_id is not None:
+                loop.quit()
+                return False
+            return True
+
+        GLib.timeout_add(5, check_node)
+        loop.run()
+
+        gst_cmd = [
+            "gst-launch-1.0", "-q",
+            "pipewiresrc", f"path={node_id}", "num-buffers=1", "keepalive-time=100",
+            "!", "videoconvert",
+            "!", "pngenc",
+            "!", "filesink", f"location={SNAPSHOT_PATH}"
+        ]
+        subprocess.run(gst_cmd, check=True, timeout=2.0)
+        session_proxy.call_sync("Stop", None, Gio.DBusCallFlags.NONE, -1, None)
+        return os.path.exists(SNAPSHOT_PATH)
+    except Exception:
+        return False
 
 
 class AreaSelector(Gtk.Window):
@@ -15,12 +85,13 @@ class AreaSelector(Gtk.Window):
         self.set_title('GNOMEscroll Area Selector')
         self.set_decorated(False)
 
-        # Enable true RGBA transparency on Wayland & X11
-        screen = Gdk.Screen.get_default()
-        visual = screen.get_rgba_visual() if screen else None
-        if visual:
-            self.set_visual(visual)
-        self.set_app_paintable(True)
+        # Load live desktop snapshot as the backdrop
+        self.bg_surface = None
+        if os.path.exists(SNAPSHOT_PATH):
+            try:
+                self.bg_surface = cairo.ImageSurface.create_from_png(SNAPSHOT_PATH)
+            except Exception:
+                self.bg_surface = None
 
         self.start_x = None
         self.start_y = None
@@ -79,7 +150,6 @@ class AreaSelector(Gtk.Window):
             if w >= 20 and h >= 20:
                 x1 = min(self.start_x, self.curr_x)
                 y1 = min(self.start_y, self.curr_y)
-                # Hide window immediately before printing
                 self.hide()
                 while Gtk.events_pending():
                     Gtk.main_iteration()
@@ -117,14 +187,15 @@ class AreaSelector(Gtk.Window):
         screen_w = alloc.width
         screen_h = alloc.height
 
-        # 1. Clear background completely to 100% transparent (desktop visible!)
-        cr.save()
-        cr.set_operator(cairo.OPERATOR_SOURCE)
-        cr.set_source_rgba(0.0, 0.0, 0.0, 0.0)
-        cr.paint()
-        cr.restore()
+        # 1. Paint the live desktop snapshot as the base!
+        if self.bg_surface:
+            cr.set_source_surface(self.bg_surface, 0, 0)
+            cr.paint()
+        else:
+            cr.set_source_rgba(0.1, 0.1, 0.1, 1.0)
+            cr.paint()
 
-        # 2. Draw 35% dim overlay outside selection
+        # 2. Draw dim overlay outside selection
         if self.start_x is not None and self.curr_x is not None:
             x = min(self.start_x, self.curr_x)
             y = min(self.start_y, self.curr_y)
@@ -132,7 +203,8 @@ class AreaSelector(Gtk.Window):
             h = abs(self.curr_y - self.start_y)
 
             cr.save()
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.35)
+            # 40% darkness outside the selection rectangle
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.40)
 
             # Top band
             if y > 0:
@@ -150,6 +222,8 @@ class AreaSelector(Gtk.Window):
             if x + w < screen_w:
                 cr.rectangle(x + w, y, screen_w - (x + w), h)
                 cr.fill()
+
+            # The region inside [x, y, w, h] is 100% UNTOUCHED — completely crisp original desktop!
 
             # Blue selection border
             if w >= 2 and h >= 2:
@@ -206,8 +280,8 @@ class AreaSelector(Gtk.Window):
 
             cr.restore()
         else:
-            # No selection yet: subtle 20% tint so user knows tool is active
-            cr.set_source_rgba(0.0, 0.0, 0.0, 0.20)
+            # No selection yet: subtle 15% dimming over desktop so user knows overlay is active
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.15)
             cr.rectangle(0, 0, screen_w, screen_h)
             cr.fill()
 
@@ -243,6 +317,10 @@ class AreaSelector(Gtk.Window):
 
 
 def main():
+    # 1. Grab snapshot of live desktop first
+    capture_desktop_snapshot()
+
+    # 2. Open area selector
     win = AreaSelector()
     win.show_all()
     Gtk.main()
