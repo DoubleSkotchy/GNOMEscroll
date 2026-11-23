@@ -74,13 +74,20 @@ pub fn export_screenshot(
         }
     }
 
-    // 6. Send desktop notification
+    // 6. Play native screenshot shutter sound & send desktop notification
+    play_camera_sound();
     send_notification(&out_path, copied);
 
     Ok(ExportResult {
         file_path: Some(out_path),
         copied_to_clipboard: copied,
     })
+}
+
+fn play_camera_sound() {
+    let _ = Command::new("canberra-gtk-play")
+        .args(["-i", "screen-capture"])
+        .spawn();
 }
 
 fn send_notification(file_path: &Path, copied: bool) {

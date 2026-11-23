@@ -30,47 +30,65 @@ def main():
         win.set_decorated(False)
         win.set_focusable(False)
 
-        # Style provider for sleek dark rounded pill look
+        # CSS for modern Adwaita frosted-glass pill styling
         css_provider = Gtk.CssProvider()
         css = """
         window {
             background-color: transparent;
         }
-        .pill-box {
-            background-color: rgba(30, 30, 30, 0.92);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-            border-radius: 28px;
-            padding: 8px 16px;
-            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+        .osd-pill {
+            background: rgba(30, 30, 30, 0.90);
+            border: 1px solid rgba(255, 255, 255, 0.18);
+            border-radius: 9999px;
+            padding: 8px 18px;
+            box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
         }
-        .pill-label {
+        .rec-dot {
+            color: #e01b24;
+            font-size: 16px;
+            margin-right: 6px;
+        }
+        .pill-title {
             color: #ffffff;
-            font-weight: bold;
+            font-weight: 700;
             font-size: 13px;
-            margin-right: 12px;
+            margin-right: 4px;
         }
-        .pill-btn-done {
+        .pill-subtitle {
+            color: rgba(255, 255, 255, 0.65);
+            font-size: 12px;
+            margin-right: 14px;
+        }
+        .btn-finish {
             background-color: #3584e4;
-            color: white;
-            font-weight: bold;
-            border-radius: 18px;
-            padding: 6px 14px;
+            color: #ffffff;
+            font-weight: 700;
+            font-size: 12px;
+            border-radius: 9999px;
+            padding: 6px 16px;
             border: none;
+            transition: all 150ms ease-in-out;
         }
-        .pill-btn-done:hover {
+        .btn-finish:hover {
             background-color: #1c71d8;
         }
-        .pill-btn-cancel {
-            background-color: rgba(255, 255, 255, 0.1);
+        .btn-finish:active {
+            background-color: #15539e;
+        }
+        .btn-cancel {
+            background-color: rgba(255, 255, 255, 0.12);
             color: #e0e0e0;
-            border-radius: 18px;
+            font-weight: 600;
+            font-size: 12px;
+            border-radius: 9999px;
             padding: 6px 12px;
             border: none;
             margin-left: 6px;
+            transition: all 150ms ease-in-out;
         }
-        .pill-btn-cancel:hover {
+        .btn-cancel:hover {
             background-color: #e01b24;
-            color: white;
+            color: #ffffff;
         }
         """
         css_provider.load_from_data(css.encode('utf-8'))
@@ -80,26 +98,41 @@ def main():
             Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
         )
 
+        # Wrap in Gtk.WindowHandle so the pill can be dragged anywhere on screen
+        handle = Gtk.WindowHandle()
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.add_css_class('pill-box')
+        box.add_css_class('osd-pill')
 
-        label = Gtk.Label(label='📜 GNOMEscroll: Scroll down now...')
-        label.add_css_class('pill-label')
-        box.append(label)
+        # Red recording pulse indicator
+        rec_dot = Gtk.Label(label='●')
+        rec_dot.add_css_class('rec-dot')
+        box.append(rec_dot)
 
-        btn_done = Gtk.Button(label='✅ Finish')
-        btn_done.add_css_class('pill-btn-done')
-        btn_done.set_focusable(False)
-        btn_done.connect('clicked', lambda _: send_action_and_exit('DONE'))
-        box.append(btn_done)
+        # Label: Title & hint
+        title = Gtk.Label(label='Recording')
+        title.add_css_class('pill-title')
+        box.append(title)
 
-        btn_cancel = Gtk.Button(label='✕')
-        btn_cancel.add_css_class('pill-btn-cancel')
+        subtitle = Gtk.Label(label='•  Scroll down freely')
+        subtitle.add_css_class('pill-subtitle')
+        box.append(subtitle)
+
+        # Finish button
+        btn_finish = Gtk.Button(label='✅ Finish (Enter)')
+        btn_finish.add_css_class('btn-finish')
+        btn_finish.set_focusable(False)
+        btn_finish.connect('clicked', lambda _: send_action_and_exit('DONE'))
+        box.append(btn_finish)
+
+        # Cancel button
+        btn_cancel = Gtk.Button(label='✕ Esc')
+        btn_cancel.add_css_class('btn-cancel')
         btn_cancel.set_focusable(False)
         btn_cancel.connect('clicked', lambda _: send_action_and_exit('CANCEL'))
         box.append(btn_cancel)
 
-        win.set_child(box)
+        handle.set_child(box)
+        win.set_child(handle)
         win.present()
 
     app.connect('activate', on_activate)
@@ -107,4 +140,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-

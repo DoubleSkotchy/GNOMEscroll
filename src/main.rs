@@ -122,13 +122,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    println!("======================================================");
-    println!(" 📜 GNOMEscroll: Scrolling Screenshot Active");
-    println!(" Capture Region : {}x{} at ({}, {})", width, height, x, y);
-    println!(" 👉 Scroll down now using your mouse wheel / trackpad!");
-    println!(" ⌨️  Press [Enter] or click 'Finish' when done.");
-    println!(" ⌨️  Press Ctrl+C or click 'Cancel' to abort.");
-    println!("======================================================");
+    println!("╔════════════════════════════════════════════════════════════════╗");
+    println!("║             📜 GNOMEscroll: Scrolling Screenshot              ║");
+    println!("╠════════════════════════════════════════════════════════════════╣");
+    println!("║  📐 Area       : {:>4} × {:<4} px at ({:>4}, {:<4})                ║", width, height, x, y);
+    println!("║  👉 Action     : Scroll down freely using mouse wheel/trackpad ║");
+    println!("║  ⌨️  Finish     : Press [Enter] or click 'Finish' in the pill   ║");
+    println!("║  ❌ Cancel     : Press [Esc] / Ctrl+C to abort                 ║");
+    println!("╚════════════════════════════════════════════════════════════════╝");
 
     // 1. Start Mutter Screencast session
     let screencast = match screencast::ScreencastSession::new(x, y, width, height) {
@@ -214,7 +215,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if final_h <= height && count <= 1 {
         println!("ℹ️  No scrolling movement detected. Single frame captured.");
     } else {
-        println!("✨ Successfully stitched long screenshot: {}x{} px ({} slices)", final_w, final_h, count);
+        println!("\n✨ Capture completed!");
+        println!("   📐 Dimensions : {} × {} px ({} slices)", final_w, final_h, count);
     }
 
     // Export to file, clipboard, and desktop notification
@@ -227,10 +229,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     if let Some(path) = export_res.file_path {
-        println!("💾 Saved to: {}", path.display());
+        println!("   💾 Saved file : {}", path.display());
     }
     if export_res.copied_to_clipboard {
-        println!("📋 Copied to system clipboard (image/png).");
+        println!("   📋 Clipboard  : Copied to system clipboard (image/png)");
     }
 
     Ok(())
