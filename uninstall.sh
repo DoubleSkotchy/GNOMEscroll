@@ -54,9 +54,8 @@ rm -f "$HOME/.config/autostart/gnomescroll*" "$HOME/.local/share/applications/gn
 # ==============================================================================
 for ext in "gnomescroll@doubleskotchy.github.com" "gnomescroll@kalpit.github.com"; do
     if which gnome-extensions >/dev/null 2>&1; then
-        echo "⚙️  Disabling and removing extension $ext..."
+        echo "⚙️  Disabling extension $ext..."
         gnome-extensions disable "$ext" 2>/dev/null || true
-        gnome-extensions uninstall "$ext" 2>/dev/null || true
     fi
     rm -rf "$HOME/.local/share/gnome-shell/extensions/$ext"
 done

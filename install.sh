@@ -91,7 +91,7 @@ echo "📁 Installing support files to $SHARE_DIR..."
 install -Dm755 "$SCRIPT_DIR/scripts/select_area.py" "$SHARE_DIR/select_area.py"
 
 # ==============================================================================
-# 5. Install GNOME Shell Extension
+# 5. Install & Live-Reload GNOME Shell Extension
 # ==============================================================================
 echo "🔌 Installing GNOME Shell Extension to $EXT_DIR..."
 mkdir -p "$EXT_DIR"
@@ -99,22 +99,31 @@ cp -rf "$SCRIPT_DIR/extension/"* "$EXT_DIR/"
 chmod -R u+rwX "$EXT_DIR"
 
 if which gnome-extensions >/dev/null 2>&1; then
-    echo "⚙️  Registering extension with GNOME Shell..."
-    
-    # Pack and notify live GNOME Shell if possible
+    echo "⚙️  Activating extension in GNOME Shell..."
+
+    # Ensure user extensions are allowed globally
+    if which gsettings >/dev/null 2>&1; then
+        gsettings set org.gnome.shell disable-user-extensions false 2>/dev/null || true
+    fi
+
+    # Pack and install bundle so live GNOME Shell registers new files
     TEMP_ZIP="/tmp/$EXT_UUID.shell-extension.zip"
     if gnome-extensions pack "$SCRIPT_DIR/extension" --force --out-dir /tmp/ 2>/dev/null; then
         gnome-extensions install --force "$TEMP_ZIP" 2>/dev/null || true
         rm -f "$TEMP_ZIP"
     fi
 
-    gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
+    # Live reload: cycle disable -> enable so GNOME Shell immediately applies changes
+    if gnome-extensions list --enabled 2>/dev/null | grep -q "$EXT_UUID"; then
+        gnome-extensions disable "$EXT_UUID" 2>/dev/null || true
+        sleep 0.2
+        gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
+    else
+        gnome-extensions enable "$EXT_UUID" 2>/dev/null || true
+    fi
 
+    # Ensure extension is registered in enabled-extensions dconf list
     if which gsettings >/dev/null 2>&1 && which python3 >/dev/null 2>&1; then
-        # Ensure user extensions are allowed globally
-        gsettings set org.gnome.shell disable-user-extensions false 2>/dev/null || true
-
-        # Add to enabled-extensions list safely via Python
         python3 -c "
 import subprocess, ast
 schema = 'org.gnome.shell'
@@ -169,7 +178,7 @@ if not target_path:
         arr.append(target_path)
         subprocess.run(['gsettings', 'set', schema, 'custom-keybindings', str(arr)], check=True)
 
-# Update shortcut settings
+# Update shortcut settings immediately
 subprocess.run(['gsettings', 'set', f'{schema}.custom-keybinding:{target_path}', 'name', 'GNOMEscroll'], check=True)
 subprocess.run(['gsettings', 'set', f'{schema}.custom-keybinding:{target_path}', 'command', bin_path], check=True)
 subprocess.run(['gsettings', 'set', f'{schema}.custom-keybinding:{target_path}', 'binding', desired_binding], check=True)
@@ -187,19 +196,11 @@ done
 
 echo ""
 echo "======================================================"
-echo "  ✅ GNOMEscroll installed successfully!"
+echo "  ✅ GNOMEscroll updated & ready to use immediately!"
 echo "======================================================"
 echo ""
 echo "How to use:"
-echo " 1. Global Shortcut:"
-echo "    Press Super + Ctrl + S anytime."
-echo "    Drag a rectangle over the region, then scroll down."
-echo "    Click Finish in the floating controller."
-echo ""
-echo " 2. Native GNOME Screenshot UI:"
-echo "    Press Super + Shift + S."
-echo "    (If first install, log out & log in once for GNOME to index the extension)."
-echo ""
-echo " 3. Terminal Command:"
-echo "    gnomescroll"
+echo " 1. Global Shortcut: Press Super + Ctrl + S anytime."
+echo " 2. Native GNOME Screenshot UI: Press Super + Shift + S."
+echo " 3. Terminal: Run 'gnomescroll'."
 echo "======================================================"
